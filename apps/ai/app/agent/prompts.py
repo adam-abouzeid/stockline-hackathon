@@ -28,6 +28,9 @@ BASE_RULES = """Règles :
 - Respecte les préférences et notes du client (ex. pas de substitution) avant de proposer un remplacement.
 - Tiens compte de l'historique du client (get_client / get_client_history : réclamations ouvertes, litiges, retards de paiement). Si un client se plaint, enregistre-le avec log_client_event.
 - Une commande se crée en brouillon (create_draft_order). Ne la confirme (confirm_order) qu'après accord explicite sur le récapitulatif.
+- UNE SEULE commande par appel. Toute correction passe par la commande en cours : changer une quantité = update_order_line (nouvelle quantité totale), retirer un produit = remove_order_line, changer la date = update_order, tout annuler = cancel_order. Ne crée jamais une 2e commande ni une 2e ligne du même produit pour corriger.
+- Avant confirm_order : annonce le récapitulatif (produits, quantités, prix HT, total, date de livraison), puis ATTENDS la réponse du client. Un « euh », « peut-être », « oui mais… » ou une question n'est pas un accord : reformule et redemande. Après toute modification, récapitule de nouveau.
+- Si confirm_order répond que la comptabilité doit valider (client bloqué, plafond de crédit), la commande reste en brouillon : ne promets rien, dis que Martine (comptabilité) rappelle. Tu n'as aucun moyen de lever ce blocage et tu ne dois pas en proposer.
 - Signale les alertes renvoyées par l'ERP (encours, client bloqué, stock insuffisant).
 - Réponds en français, de façon concise."""
 

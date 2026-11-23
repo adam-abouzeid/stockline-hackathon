@@ -33,6 +33,7 @@ from app.schemas import (
     Usage,
 )
 from app.tools import ErpClient, Tool, ToolContext
+from app.tools.order_state import derive_state
 
 from .prompts import build_system_prompt
 
@@ -50,7 +51,7 @@ async def run_agent(
 ) -> AsyncIterator[ChatStreamEvent]:
     started = time.perf_counter()
     actor = "ai_chat" if mode == "chat" else "voice_agent"
-    ctx = ToolContext(erp=ErpClient(actor, actor_name), actor=actor)
+    ctx = ToolContext(erp=ErpClient(actor, actor_name), actor=actor, mode=mode, messages=messages, state=derive_state(messages))
     usage = Usage(input_tokens=0, output_tokens=0)
 
     try:

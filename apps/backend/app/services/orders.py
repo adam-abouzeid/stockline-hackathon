@@ -312,13 +312,30 @@ def delete_line(ctx: Ctx, id: str, line_id: str) -> Doc:
     return order_detail(id)
 
 
+AI_ACTORS = ("ai_chat", "voice_agent")
+
+
+def _require_human_for_credit(ctx: Ctx, order: Doc) -> None:
+    """Blocked client or credit limit exceeded: the AI (chat / voice) may prepare the order but not confirm it.
+    The house process (05-prix-et-credit.md) sends these to Martine; she confirms it herself in the web UI (actor `user`)."""
+    codes = {w["code"] for w in order_warnings(order)}
+    name = _client_name(order["clientId"])
+    if "client_blocked" in codes:
+        raise conflict("client_blocked", f"Le client {name} est bloqué : aucune confirmation sans l'accord de la comptabilité (Martine). La commande reste en brouillon.")  # fmt: skip
+    if "credit_limit" in codes:
+        raise conflict("credit_approval_required", f"Le plafond de crédit de {name} serait dépassé : la commande doit être validée par la comptabilité (Martine). Elle reste en brouillon.")  # fmt: skip
+
+
 @transactional
 def confirm_order(ctx: Ctx, id: str) -> Doc:
-    """draft → confirmed. Warnings never block; they are returned on the detail."""
+    """draft → confirmed. Warnings never block; they are returned on the detail.
+    Exception: the AI actors (ai_chat, voice_agent) cannot confirm for a blocked client or over the credit limit."""
     order = crud.orders.require(id)
     _guard(order, ["draft"], "confirmer")
     if not order["lines"]:
         raise conflict("empty_order", f"La commande {order['number']} n'a aucune ligne")
+    if ctx.actor in AI_ACTORS:  # the AI never decides these: a human (accounting) confirms from the web UI
+        _require_human_for_credit(ctx, order)
     confirmed = _save({**order, "status": "confirmed", "confirmedAt": now()})
     run_id = routing.attach_order(confirmed)
     if run_id:

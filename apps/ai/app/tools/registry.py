@@ -35,6 +35,10 @@ from .erp import Actor, ErpClient
 class ToolContext:
     erp: ErpClient  # HTTP client for the ERP API, already tagged with x-actor
     actor: Actor  # "ai_chat" (web chat) or "voice_agent" (phone / voice commands)
+    # V1 order safety (see tools/order_state.py, tools/approval.py). All optional: a bare ToolContext(erp, actor) still works.
+    mode: str = "chat"  # chat | voice | command
+    messages: list | None = None  # the conversation so far (the live list the agent loop appends to)
+    state: Any = None  # OrderState: the active order of this conversation, rebuilt from `messages` each turn
 
 
 class ToolArgs(BaseModel):
