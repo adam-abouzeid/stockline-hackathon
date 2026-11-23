@@ -1,0 +1,31 @@
+#Ignore files.
+Starter_file/.env
+# dependencies & builds
+Starter_file/node_modules
+Starter_file/dist
+.venv
+__pycache__
+Starter_file/__pycache__
+*.pyc
+Starter_file/*.pyc
+.pytest_cache
+Starter_file/.pytest_cache
+.ruff_cache
+Starter_file/.ruff_cache
+
+# secrets: never commit your keys
+.env
+.env.*
+Starter_file/.env.*
+!.env.example
+Starter_file/!.env.example
+
+# local databases
+*.db
+*.db-*
+apps/*/data/
+
+# company data (shipped in your team zip; too big for git)
+data/seed/
+Starter_file/data/seed/
+.DS_Store

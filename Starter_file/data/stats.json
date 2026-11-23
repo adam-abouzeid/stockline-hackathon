@@ -1,0 +1,38 @@
+{
+  "slug": "comptoir-des-chartrons",
+  "name": "Comptoir des Chartrons",
+  "trade": "vins et boissons",
+  "region": "Bordeaux et Gironde",
+  "city": "Bruges",
+  "employees": 28,
+  "clients": 92,
+  "products": 66,
+  "suppliers": 11,
+  "orders": 19691,
+  "stockoutPct": 0,
+  "worstStockouts": [
+    "JU-CIT-VER:6"
+  ],
+  "seedMB": 76.6,
+  "generationSeconds": 3.9,
+  "counts": {
+    "products": 66,
+    "clients": 92,
+    "clientPrices": 133,
+    "suppliers": 11,
+    "supplierPrices": 68,
+    "lots": 12714,
+    "stockMovements": 156979,
+    "orders": 19691,
+    "purchaseOrders": 3295,
+    "invoices": 9086,
+    "payments": 6772,
+    "routes": 5,
+    "routeRuns": 2996,
+    "clientEvents": 3654,
+    "supplierEvents": 731,
+    "tags": 29,
+    "priceRules": 8,
+    "contextEntries": 1079
+  }
+}
