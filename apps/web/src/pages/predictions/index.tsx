@@ -122,7 +122,7 @@ function Rescue() {
   return (
     <Section title="Stock à écouler avant la date limite" count={q.data?.items.length}>
       <p className="mb-3 max-w-[760px] text-[12.5px] text-muted-foreground">
-        Lots que le rythme de vente actuel n'écoulera pas à temps. Pour chacun : les clients qui l'achètent déjà et une remise qui ne descend jamais sous le coût.
+        Lots que les ventes attendues (saison comprise) n'écouleront pas avant leur date limite. Pour chacun : les clients qui l'achètent déjà et une remise qui ne descend jamais sous le coût.
         Ce sont des brouillons : le bouton note l'offre dans l'historique du client, rien n'est envoyé ni modifié.
       </p>
       {q.isLoading ? (
@@ -152,7 +152,7 @@ function RescueCard({ item: i }: { item: RescueItem }) {
         <Link to={`/products/${i.productId}`} className="text-[13px] font-medium hover:underline">{i.productName}</Link>
         <Badge tone={i.daysToExpiry <= 7 ? "destructive" : "warning"}>date limite dans {i.daysToExpiry} j</Badge>
         <span className="num text-[12px] text-muted-foreground">
-          {num(i.atRiskUnits)} {i.unit} en danger ({fmtMoney(i.atRiskValue)} au coût) · {num(i.weeklySales)} vendus par semaine
+          {num(i.atRiskUnits)} {i.unit} en danger ({fmtMoney(i.atRiskValue)} au coût) · {num(i.weeklySales)} ventes attendues par semaine
         </span>
       </div>
       <p className="mt-1 text-[12px] text-muted-foreground">{i.reason}</p>

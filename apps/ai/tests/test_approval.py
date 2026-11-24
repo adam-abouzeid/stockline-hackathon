@@ -9,7 +9,9 @@ from app.tools.order_state import derive_state
 
 @pytest.mark.parametrize(
     "text",
-    ["Oui", "oui.", "OK", "Ok, vas-y", "OK, vas-y.", "Oui, confirme", "C'est bon", "d'accord", "Parfait", "ouais ouais", "Oui, pas de souci", "Yes", "Nickel, envoie", "Allez, go", "Oui c'est ça"],
+    ["Oui", "oui.", "OK", "Ok, vas-y", "OK, vas-y.", "Oui, confirme", "C'est bon", "d'accord", "Parfait", "ouais ouais", "Oui, pas de souci", "Yes", "Nickel, envoie", "Allez, go", "Oui c'est ça",
+     # V2: plain yeses with polite filler stay accepted
+     "Oui, c'est tout", "Oui merci, au revoir", "Ben oui", "Bah ouais", "Oui je confirme", "Oui, c'est noté", "Tout à fait", "Oui oui, parfait"],
 )
 def test_clear_approvals(text):
     assert is_explicit_approval(text).approved, text
@@ -41,6 +43,20 @@ def test_clear_approvals(text):
         "Ça dépend, je vérifie avec le chef et je te rappelle dans une heure ou deux ok",  # too long
         "Merci",  # polite, not an approval
         "Bonjour",
+        # V2: hedged or conditional "yes" that the old blocklist let through (found by the bench: "oui si tu veux" confirmed)
+        "Oui si tu veux",
+        "Oui je pense",
+        "Oui je crois que c'est bon",
+        "Oui normalement",
+        "Oui, c'est bon pour moi a priori",
+        "Hmm ok",
+        "Oui... enfin je crois",
+        "Oui pour lundi",  # a date slipped into the yes
+        "Oui, livrez demain",
+        "Ouais pourquoi pas",
+        "Oui, comme vous voulez",
+        "On verra",
+        "Si vous voulez",
     ],
 )
 def test_ambiguous_or_conditional_consent_is_not_approval(text):
@@ -62,6 +78,17 @@ def msgs(*items) -> list[ChatMessage]:
 def test_gate_happy_path():
     h = msgs(("user", "deux fûts"), ("tool", "create_draft_order"), ("assistant", "Deux fûts, 184 euros. Je confirme ?"), ("user", "Oui vas-y"))
     assert confirmation_gate(h).approved
+
+
+def test_gate_accepts_an_order_prepared_by_reorder_last_order():
+    # regression found by the bench: reorder_last_order was unknown to the gate → "la commande n'a pas été préparée" forever
+    h = msgs(("user", "comme d'habitude"), ("tool", "reorder_last_order"), ("assistant", "Je reprends votre dernière commande, 888 euros. On confirme ?"), ("user", "Oui, c'est bon, vas-y"))
+    assert confirmation_gate(h).approved
+
+
+def test_reorder_last_order_makes_its_order_the_active_one():
+    h = msgs(("user", "comme d'habitude"), ("tool", "reorder_last_order"))
+    assert derive_state(h).order_id == "ord_1"  # so a 2nd create_draft_order is refused: no duplicate order
 
 
 def test_gate_refuses_without_recap_turn():

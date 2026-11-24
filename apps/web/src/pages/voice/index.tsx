@@ -15,6 +15,7 @@ import { Button, Dot, IconButton, Input, Kbd, Page, PageHeader, Spinner, Tabs } 
 import { useVoiceSession, type Activity, type Conn } from "@/features/assistant/useVoiceSession";
 import { CommandMode } from "./command";
 import { LiveActivity } from "./live-activity";
+import { LiveOrder } from "./live-order";
 import { MetricsBar } from "./metrics";
 import { LevelBars, Timeline } from "./timeline";
 
@@ -150,8 +151,11 @@ function CallMode({ modeSwitch }: { modeSwitch: ReactNode }) {
             </form>
           </div>
         </section>
-        <aside className="w-[280px] shrink-0 border-l border-border bg-card xl:w-[320px] 2xl:w-[380px]">
-          <LiveActivity />
+        <aside className="flex w-[280px] shrink-0 flex-col border-l border-border bg-card xl:w-[320px] 2xl:w-[380px]">
+          <LiveOrder />
+          <div className="min-h-0 flex-1">
+            <LiveActivity />
+          </div>
         </aside>
       </div>
     </Page>

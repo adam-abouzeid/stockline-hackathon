@@ -22,6 +22,7 @@ AFFIRMATIVE = (
     "oui", "ouais", "ouaip", "yes", "yep", "ok", "okay", "okey", "dac", "daccord", "d accord", "vas y", "vasy", "allez", "go",
     "c est bon", "cest bon", "ca marche", "ca roule", "parfait", "nickel", "impeccable", "tres bien", "bien sur", "banco",
     "entendu", "exactement", "c est ca", "confirme", "confirmez", "valide", "validez", "envoie", "envoyez", "sure", "that s right",
+    "tout a fait", "absolument", "evidemment", "volontiers",
 )  # fmt: skip
 
 # Anything that suggests a change, a doubt, a question or a refusal. Presence of ANY of them → not an approval.
@@ -30,6 +31,15 @@ BLOCKERS = (
     "modifi", "ajout", "rajout", "retir", "enlev", "supprim", "annul", "remplac", "en plus", "de plus", "et aussi", "aussi",
     "combien", "quand", "quel", "comment", "pourquoi", "peut etre", "sais pas", "sais plus", "hesit", "reflechi", "verifi",
     "laisse", "sinon", "et si", "euh", "hum", "bof", "wait", "but", "no", "not", "actually", "maybe", "change", "instead",
+)  # fmt: skip
+BLOCKERS += ("pense", "crois", "normalement", "priori", "suppose", "probablement", "si")  # hedges: clearer refusal reasons
+
+# Every word of an approval must be here (after `normalize`: lowercase, no accents, apostrophes/hyphens → spaces).
+ALLOWED_WORDS = frozenset(
+    "oui ouais ouaip yes yep ok okay okey dac daccord d accord vas y vasy allez go c est bon ca marche roule parfait parfaitement "
+    "nickel impeccable tres bien sur banco entendu exactement confirme confirmez valide validez envoie envoyez sure that s right "
+    "ben bah alors donc je le la on pour moi me nous commande tout fait voila note compris absolument evidemment volontiers "
+    "super top genial merci beaucoup s il vous plait svp au revoir bonne journee soiree bientot monsieur madame a".split()
 )  # fmt: skip
 HARMLESS_NEGATIONS = ("pas de souci", "pas de probleme", "pas de soucis", "no problem", "no worries")
 
@@ -75,6 +85,11 @@ def is_explicit_approval(text: str | None) -> Verdict:
         # prefix match for stems ("modifi"), whole-word match for short words ("non", "no")
         if (f" {b} " in t) if len(b) <= 4 else (f" {b}" in t):
             return Verdict(False, f"réserve ou changement détecté (« {b.strip()} »)")
+    # Allowlist (V2): EVERY word must be a yes-word or a polite filler. A blocklist can never list every way to hedge
+    # ("oui je pense", "oui si tu veux", "oui pour lundi"…): an unknown word means "not a plain yes" → one more question.
+    unknown = [w for w in words if w not in ALLOWED_WORDS]
+    if unknown:
+        return Verdict(False, f"mot qui n'est pas un simple accord (« {unknown[0]} »)")
     if any(f" {a} " in t for a in AFFIRMATIVE):
         return Verdict(True, "accord explicite")
     return Verdict(False, "aucun accord explicite")

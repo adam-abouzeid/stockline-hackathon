@@ -80,8 +80,10 @@ def _week_number(d: dt.date) -> int:
     return min(d.isocalendar()[1], 52)
 
 
-def _profile(series: dict[dt.date, float]):
-    """(usual week of the last 52 weeks, index function by ISO week number, years of history)."""
+def _profile(series: dict[dt.date, float], smooth: bool = True):
+    """(usual week of the last 52 weeks, index function by ISO week number, years of history).
+    `smooth` averages each week with its two neighbours: right to spot a season, but it spreads a one-week spike (the Beaujolais
+    day) onto the weeks around it, so the stock forecast turns it off."""
     by_week: dict[int, list[float]] = defaultdict(list)
     for w, q in series.items():
         by_week[_week_number(w)].append(q)
@@ -92,7 +94,7 @@ def _profile(series: dict[dt.date, float]):
 
     def index(week: dt.date) -> float:
         k = _week_number(week)
-        vals = [avg[((k - 1 + d) % 52) + 1] for d in (-1, 0, 1) if ((k - 1 + d) % 52) + 1 in avg]  # 3-week smoothing
+        vals = [avg[((k - 1 + d) % 52) + 1] for d in ((-1, 0, 1) if smooth else (0,)) if ((k - 1 + d) % 52) + 1 in avg]
         return (sum(vals) / len(vals)) / overall if overall > 0 and vals else 0.0
 
     years = max(1, round(len(series) / 52))  # years of history = weeks of history / 52 (not calendar-year labels)
@@ -246,10 +248,27 @@ def radar_backtest(as_of: str, horizon_weeks: int = 10, threshold: float = 2.0) 
 
 
 def _weekly_rate(product_id: str, as_of: str) -> float:
-    """Units sold per week: the mean of the last SALES_WEEKS complete weeks."""
+    """Units sold per week: the mean of the last SALES_WEEKS complete weeks (fallback when there is no seasonal profile)."""
     current = _monday(as_of)
     weeks = _weekly_demand().get(product_id, {})
     return sum(weeks.get(current - dt.timedelta(weeks=k), 0.0) for k in range(1, SALES_WEEKS + 1)) / SALES_WEEKS
+
+
+def _cumulative_sales(product_id: str, as_of: str, days: int) -> list[float]:
+    """cum[d] = units expected to sell in the next d days. Season-aware when the product has a seasonal profile
+    (a usual week x the index of each coming week, like the radar), else the recent weekly rate held constant."""
+    t = dt.date.fromisoformat(as_of)
+    series = _series(_weekly_demand().get(product_id, {}), _monday(as_of))
+    if series is None:
+        rate = _weekly_rate(product_id, as_of) / 7
+        daily = lambda _d: rate  # noqa: E731
+    else:
+        usual, index, _ = _profile(series, smooth=False)  # a sharp spike must not leak onto the next weeks
+        daily = lambda d: usual * index(_monday(t + dt.timedelta(days=d))) / 7  # noqa: E731
+    cum = [0.0]
+    for d in range(1, days + 1):
+        cum.append(cum[-1] + daily(d))
+    return cum
 
 
 @per_data_version
@@ -265,8 +284,8 @@ def _buyers() -> dict[str, dict[str, list[tuple[dt.date, float]]]]:
     return out
 
 
-def _unsold_units(lots: list[Doc], reserved: float, daily_rate: float, t: dt.date) -> list[tuple[Doc, float, int]]:
-    """FEFO: committed orders take the oldest lots first, then sales at `daily_rate`. Returns (lot, unsold units at expiry, days left)."""
+def _unsold_units(lots: list[Doc], reserved: float, cum: list[float], t: dt.date) -> list[tuple[Doc, float, int]]:
+    """FEFO: committed orders take the oldest lots first, then the expected sales (`cum`). Returns (lot, unsold units at expiry, days left)."""
     to_commit, consumed, out = reserved, 0.0, []
     for lot in lots:  # already sorted by expiry
         qty = lot["qtyRemaining"]
@@ -276,7 +295,8 @@ def _unsold_units(lots: list[Doc], reserved: float, daily_rate: float, t: dt.dat
         days = (dt.date.fromisoformat(lot["expiresAt"][:10]) - t).days
         if days < 1:
             continue  # expires today or already expired: nothing can still be delivered, it is not a rescue any more
-        sold_here = min(qty, max(0.0, daily_rate * days - consumed))
+        capacity = cum[min(days, len(cum) - 1)]
+        sold_here = min(qty, max(0.0, capacity - consumed))
         consumed += sold_here
         if qty - sold_here >= EXPIRY_UNIT_MIN:
             out.append((lot, qty - sold_here, days))
@@ -299,7 +319,7 @@ def _already_proposed(client_id: str, product_id: str) -> bool:
     )
 
 
-def stock_rescue(horizon_days: int = 45) -> Doc:
+def stock_rescue(horizon_days: int = 120) -> Doc:
     t_iso = today()
     t = dt.date.fromisoformat(t_iso)
     levels = stock_levels()
@@ -308,8 +328,10 @@ def stock_rescue(horizon_days: int = 45) -> Doc:
         level = levels.get(product["id"])
         if not product["active"] or not level or not level["lots"]:
             continue
-        weekly = _weekly_rate(product["id"], t_iso)
-        risk = [(lot, u, d) for lot, u, d in _unsold_units(level["lots"], level["reserved"], weekly / 7, t) if d <= horizon_days]
+        last_expiry = max((dt.date.fromisoformat(lot["expiresAt"][:10]) - t).days for lot in level["lots"])
+        cum = _cumulative_sales(product["id"], t_iso, max(28, min(last_expiry, horizon_days)))
+        weekly = cum[28] / 4  # expected units per week over the next 4 weeks
+        risk = [(lot, u, d) for lot, u, d in _unsold_units(level["lots"], level["reserved"], cum, t) if d <= horizon_days]
         units = sum(u for _, u, _ in risk)
         if units < EXPIRY_UNIT_MIN:
             continue
@@ -320,7 +342,7 @@ def stock_rescue(horizon_days: int = 45) -> Doc:
         covered = sum(c["suggestedQty"] for c in clients)
         reason = (
             f"{round(units)} {product['unit']} ne partiront pas avant leur date limite (le plus proche : {fr_day(earliest[0]['expiresAt'])}), "
-            f"car il s'en vend environ {round(weekly, 1)} par semaine."
+            f"car on n'en attend qu'environ {round(weekly, 1)} par semaine (saison comprise)."
         )
         reason += (
             f" Remise possible : {pct} % (jamais sous le coût)." if pct else " La marge est trop faible pour une remise : à proposer au prix normal ou à donner."
