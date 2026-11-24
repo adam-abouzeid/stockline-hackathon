@@ -18,6 +18,7 @@ import type {
   ClientPrice, PriceGridRow, PriceRule, PriceRuleInput, PriceRuleSummary, ResolvedPrice, TagDef,
 } from "@kit/shared";
 import type { Receivables } from "@kit/shared";
+import type { OfferInput, RadarBacktest, SeasonRadar, StockRescue } from "@kit/shared";
 import type { Category } from "@kit/shared";
 import type { ContextEntry, ContextEntryInput, ContextEntrySummary, ContextForEntity, ContextScope } from "@kit/shared";
 import type { ListParams, Page } from "@kit/shared";
@@ -271,6 +272,15 @@ export const api = {
     create: (body: ContextEntryInput) => post<ContextEntry>("/context", body),
     update: (id: Id, body: Partial<ContextEntryInput>) => patch<ContextEntry>(`/context/${id}`, body),
     remove: (id: Id) => del<{ ok: true }>(`/context/${id}`),
+  },
+
+  predictions: {
+    seasonRadar: (p?: { horizonWeeks?: number; threshold?: number; asOf?: IsoDate }) => get<SeasonRadar>("/predictions/season-radar", p),
+    /** The radar of a past day, judged on what really happened (precision / recall). */
+    radarBacktest: (asOf: IsoDate) => get<RadarBacktest>("/predictions/season-radar/backtest", { asOf }),
+    stockRescue: (p?: { horizonDays?: number }) => get<StockRescue>("/predictions/stock-rescue", p),
+    /** Marks an offer as proposed: a line in the client's history, nothing else changes. */
+    proposeOffer: (body: OfferInput) => post<ClientEvent>("/predictions/stock-rescue/offers", body),
   },
 
   admin: {

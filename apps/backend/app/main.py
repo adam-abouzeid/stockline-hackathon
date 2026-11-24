@@ -29,6 +29,7 @@ from app.routers import (
     context,
     logistics,
     orders,
+    predictions,
     pricing,
     products,
     purchase_orders,
@@ -101,6 +102,7 @@ for router in [
     logistics.routes,
     logistics.route_runs,
     context.router,
+    predictions.router,
 ]:
     app.include_router(router, responses=ERROR_RESPONSES)
 
