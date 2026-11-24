@@ -39,8 +39,15 @@ class MockSTT(STTClient):
 
 class MockTTS(TTSClient):
     name = "mock"
+    formats = ("ulaw_8000",)
 
-    async def synthesize(self, text: str, voice: str | None = None) -> TTSResult:
+    async def synthesize(self, text: str, voice: str | None = None, audio_format: str | None = None) -> TTSResult:
+        if audio_format == "ulaw_8000":  # the phone: μ-law silence, 60 ms per word (0xFF = silence in μ-law)
+            async def ulaw() -> AsyncIterator[bytes]:
+                yield b"\xff" * (480 * max(1, len(text.split())))
+
+            return TTSResult("audio/x-mulaw", ulaw())
+
         async def chunks() -> AsyncIterator[bytes]:
             yield silent_wav(0.1)
 

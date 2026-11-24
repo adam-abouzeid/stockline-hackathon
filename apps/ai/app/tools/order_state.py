@@ -25,9 +25,10 @@ ORDER_TOOLS = {
     "confirm_order",
     "cancel_order",
     "get_order",
+    "add_rescue_offer",  # V2: an accepted rescue lot added to the draft (tools/predictions.py)
 }
 # Tools that change what the customer would be agreeing to (lines, quantities, date): a recap becomes stale after them.
-MODIFYING_TOOLS = {"create_draft_order", "reorder_last_order", "add_order_line", "update_order_line", "remove_order_line", "update_order"}
+MODIFYING_TOOLS = {"create_draft_order", "reorder_last_order", "add_order_line", "update_order_line", "remove_order_line", "update_order", "add_rescue_offer"}
 
 
 @dataclass

@@ -22,6 +22,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import aclosing, suppress
 from dataclasses import dataclass, field
+from urllib.parse import quote
 
 from fastapi import WebSocket, WebSocketDisconnect
 from pydantic import TypeAdapter, ValidationError
@@ -71,6 +72,11 @@ class Conversation:
     actor_name: str | None = None
     history: list[ChatMessage] = field(default_factory=list)
     brief: str | None = None  # V3: the call brief of an outbound call (kept for the whole conversation)
+    opportunity_id: str | None = None  # V3: the outbound call in progress (tool record_call_outcome)
+    call_id: str | None = None  # V3: its call in the journal, when known (phone bridge, or the simulator's pick-up)
+
+    def outbound_call(self) -> dict | None:
+        return {"opportunityId": self.opportunity_id, "callId": self.call_id} if self.opportunity_id else None
 
 
 # In memory: a reconnect with the same sessionId continues the conversation.
@@ -78,9 +84,12 @@ conversations: dict[str, Conversation] = {}
 
 
 class VoiceConnection:
-    """One WebSocket connection. Reads client messages; runs each turn as a background task."""
+    """One WebSocket connection. Reads client messages; runs each turn as a background task.
+    The phone bridge (services/phone.py) subclasses it: same turns, another transport (send / send_bytes)."""
 
-    def __init__(self, ws: WebSocket):
+    tts_format: str | None = None  # audio format asked from the TTS (None = the provider's default, mp3 for the browser)
+
+    def __init__(self, ws: WebSocket | None):
         self.ws = ws
         self.conversation: Conversation | None = None
         self.recording: Utterance | None = None  # while the key is down
@@ -146,14 +155,16 @@ class VoiceConnection:
             case TextMessage(text=text):
                 await self.interrupt()
                 self.start_turn(text=text)
-            case OutboundMessage(opportunity_id=opportunity_id):
+            case OutboundMessage(opportunity_id=opportunity_id, call_id=call_id):
                 await self.interrupt()
                 self.conversation.history, self.conversation.brief = [], None
+                self.conversation.opportunity_id, self.conversation.call_id = opportunity_id, call_id
                 self.start_turn(outbound=opportunity_id)
             case ResetMessage():
                 await self.interrupt()
                 self.conversation.history = []
                 self.conversation.brief = None
+                self.conversation.opportunity_id = self.conversation.call_id = None
                 await self.open(self.conversation.id)
 
     async def send_partial(self, update: STTUpdate) -> None:
@@ -204,8 +215,9 @@ class VoiceConnection:
         try:
             # 1. Speech → text: with a streaming STT only the last words are left to finalize
             if outbound is not None:
-                # V3: no caller speech. Load the call brief; a synthetic first turn makes the agent open the call.
-                conv.brief = (await ErpClient("voice_agent", conv.actor_name).get(f"/api/proactive/opportunities/{outbound}"))["brief"]
+                # V3: no caller speech. Load the call brief (unless already loaded); a synthetic first turn makes the agent open the call.
+                if not conv.brief:
+                    conv.brief = (await ErpClient("voice_agent", conv.actor_name).get(f"/api/proactive/opportunities/{quote(outbound, safe='')}"))["brief"]
                 heard = OUTBOUND_OPENING
                 working = [ChatMessage(role="user", content=OUTBOUND_OPENING)]
             else:
@@ -220,9 +232,12 @@ class VoiceConnection:
 
                 # 2. Agent, on a working copy of the history (committed at the end)
                 working = [*conv.history, ChatMessage(role="user", content=heard)]
-            speaker = Speaker(get_tts_client(), self.send, self.send_bytes)
+            speaker = Speaker(get_tts_client(), self.send, self.send_bytes, self.tts_format)
             llm_start = time.perf_counter()
-            async for ev in run_agent(working, llm=get_llm_client(), tools=all_tools(), mode="voice", actor_name=conv.actor_name, brief=conv.brief):
+            async for ev in run_agent(
+                working, llm=get_llm_client(), tools=all_tools(), mode="voice", actor_name=conv.actor_name, brief=conv.brief,
+                outbound_call=conv.outbound_call(),
+            ):
                 match ev:
                     case TextEvent(delta=delta):
                         if timings.llm_first_token_ms is None:
@@ -248,6 +263,9 @@ class VoiceConnection:
             if speaker.first_byte_at:
                 timings.total_ms = int((speaker.first_byte_at - t0) * 1000 + 0.5)
             await self.send(AgentDoneMessage(text=spoken.strip(), timings=timings))
+            if outbound is not None:  # opening latency, per call (GUIDE-VOIX: measure before / after)
+                print(f"[voice] outbound opening {outbound}: llm first token {timings.llm_first_token_ms} ms, "
+                      f"tts first byte {timings.tts_first_byte_ms} ms, first audio {timings.total_ms} ms", flush=True)
 
         except asyncio.CancelledError:
             # Interrupted: keep what was heard, the tool rounds already done (an order the agent created must stay
@@ -275,8 +293,11 @@ class Speaker:
     # a sentence ends with . ! ? … followed by a space ("18.50" is not a boundary)
     SENTENCE = re.compile(r"^([\s\S]*?[.!?…])\s+")
 
-    def __init__(self, tts: TTSClient, send: Callable[[WireModel], Awaitable], send_bytes: Callable[[bytes], Awaitable]):
+    def __init__(
+        self, tts: TTSClient, send: Callable[[WireModel], Awaitable], send_bytes: Callable[[bytes], Awaitable], audio_format: str | None = None
+    ):
         self.tts, self.send, self.send_bytes = tts, send, send_bytes
+        self.audio_format = audio_format  # e.g. "ulaw_8000" for the phone; None = the provider's default (mp3)
         self.buffer = ""
         self.sentences: asyncio.Queue[str | None] = asyncio.Queue()
         self.worker: asyncio.Task | None = None  # speaks the queued sentences one after the other
@@ -320,7 +341,8 @@ class Speaker:
         while (sentence := await self.sentences.get()) is not None:
             tts_start = time.perf_counter()
             try:
-                result = await self.tts.synthesize(sentence, settings.tts.voice or None)
+                fmt = {"audio_format": self.audio_format} if self.audio_format else {}
+                result = await self.tts.synthesize(sentence, settings.tts.voice or None, **fmt)
                 # aclosing: on barge-in (cancellation) the provider's HTTP stream is closed right away
                 async with aclosing(result.chunks) as chunks:  # type: ignore[type-var]
                     async for chunk in chunks:

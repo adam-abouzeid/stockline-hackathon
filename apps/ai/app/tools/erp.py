@@ -65,6 +65,9 @@ class ErpClient:
     async def post(self, path: str, body: Any = None) -> Any:
         return await self._request("POST", path, json={} if body is None else body)
 
+    async def put(self, path: str, body: Any = None) -> Any:
+        return await self._request("PUT", path, json={} if body is None else body)
+
     async def patch(self, path: str, body: Any = None) -> Any:
         return await self._request("PATCH", path, json={} if body is None else body)
 

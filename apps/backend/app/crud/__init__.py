@@ -26,6 +26,8 @@ tags = CRUDBase(JsonTable("tags", lambda d: f"{d['scope']}|{d['id']}"), "Groupe"
 price_rules = CRUDBase(JsonTable("price_rules"), "Règle de prix")
 context_entries = CRUDBase(JsonTable("context_entries"), "Fiche de contexte")
 events = CRUDBase(JsonTable("events"), "Événement")  # the activity log
+proactive_calls = CRUDBase(JsonTable("proactive_calls"), "Appel")  # journal of the calls the agent placed (cleared on reset)
+prediction_signals = CRUDBase(JsonTable("prediction_signals", lambda d: d["eventId"]), "Signal")  # what the LLM read in client notes (cleared on reset)
 
 # Data pack file name (seed/<key>.json) → CRUD. Missing files load as [].
 PACK: dict[str, CRUDBase] = {

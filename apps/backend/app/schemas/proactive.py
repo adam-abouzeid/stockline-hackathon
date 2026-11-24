@@ -6,6 +6,7 @@ from app.schemas.base import Input, Schema
 
 OpportunityType = Literal["order_issue"]  # the only reason to phone: a client's open order cannot be delivered as planned
 IssueKind = Literal["stock", "delivery"]
+CallStatus = Literal["ringing", "answered", "declined", "missed", "cancelled"]
 
 
 class ProactiveOpportunity(Schema):
@@ -23,6 +24,7 @@ class ProactiveOpportunity(Schema):
     deadline: str  # e.g. "Livraison aujourd'hui : à prévenir avant le départ du camion"
     product_ids: list[str] = []
     order_id: str | None = None
+    order_value: float = 0  # the order's total excl. VAT: same urgency, the bigger order is called first
 
 
 class ProactiveBrief(ProactiveOpportunity):
@@ -44,10 +46,14 @@ class ProactiveCall(Schema):
     reason: str
     deadline: str
     priority: int
-    status: Literal["ringing", "answered", "declined", "missed"]
+    status: CallStatus
+    channel: Literal["simulator", "phone"] = "simulator"  # phone = a real call to the demo number through Twilio (PHONE_MODE=twilio)
+    order_id: str | None = None
     created_at: str
-    ended_at: str | None = None
-    outcome: str | None = None  # what was decided on the call (the line the agent wrote in the client's history)
+    ended_at: str | None = None  # when it stopped ringing (picked up, declined, missed or cancelled)
+    hung_up_at: str | None = None  # phone: when an answered call hung up
+    note: str | None = None  # why it did not ring / was cancelled
+    outcome: str | None = None  # what was decided on the call (record_call_outcome)
 
 
 class DispatchResult(Schema):
@@ -62,6 +68,27 @@ class AutodialState(Schema):
     cooldown_seconds: int  # pause after a call before the next one
     min_priority: int  # it never calls below this urgency
     ringing: int
+    phone_mode: Literal["simulator", "twilio"] = "simulator"  # where calls ring: the web simulator or the real demo phone
+
+
+class CallStatusInput(Input):
+    """Reported by the phone bridge. completed = an answered call hung up."""
+
+    status: Literal["declined", "missed", "cancelled", "completed"]
+    note: str | None = None
+
+
+class OutcomeInput(Input):
+    decision: str  # what was decided, in one short sentence (« livraison décalée au jeudi 24, jus ramené à 67 »)
+    summary: str | None = None
+    call_id: str | None = None  # optional: the call (the phone bridge knows it; the browser simulator only knows the opportunity)
+
+
+class OutcomeResult(Schema):
+    call: ProactiveCall | None = None
+    event_id: str
+    client_id: str
+    decision: str
 
 
 class AutodialInput(Input):

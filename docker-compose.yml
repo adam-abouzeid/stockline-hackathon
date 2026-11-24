@@ -16,6 +16,7 @@ services:
       API_PORT: "4000"
       DATA_DIR: /data
       DB_PATH: /db/erp.db
+      AI_SERVICE_URL: http://ai:4100  # phone mode: the backend asks the AI service to ring the demo phone
     volumes:
       - ./apps/backend/app:/app/apps/backend/app
       - ${DATA_DIR:-../hackathon-data}:/data:ro

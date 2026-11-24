@@ -1,5 +1,9 @@
 """
-System prompt = role + rules + mode rules + company & today's date + company context files.
+System prompt = role + rules + mode rules + company & today's date + company context files   (STATIC: same for every call)
+              + who is speaking + the outbound call brief                                      (DYNAMIC: per conversation)
+
+The static part comes first so the prompt cache (Anthropic: its own cache breakpoint) is shared by every conversation of the
+day: a new outbound call only pays for its short brief, not for the ~10k tokens of company context (opening latency).
 
   - Company context: every Markdown file in DATA_DIR/context/, re-read on each turn (edit them live).
   - "Today" comes from the ERP (GET /api/meta): the data pack has its own simulated date.
@@ -28,11 +32,13 @@ BASE_RULES = """Règles :
 - Respecte les préférences et notes du client (ex. pas de substitution) avant de proposer un remplacement.
 - Tiens compte de l'historique du client (get_client / get_client_history : réclamations ouvertes, litiges, retards de paiement). Si un client se plaint, enregistre-le avec log_client_event.
 - Une commande se crée en brouillon (create_draft_order). Ne la confirme (confirm_order) qu'après accord explicite sur le récapitulatif.
+- Fêtes de fin d'année : si le client parle de ses commandes des fêtes, get_holiday_reservation donne ce qu'il a réservé par écrit et ce qu'il a pris les années passées ; propose ces volumes, il décide.
 - « Comme d'habitude », « comme la dernière fois », « la même chose » : utilise reorder_last_order (une seule fois, après avoir identifié le client), puis récapitule et demande s'il veut ajuster. Si le client n'a pas de commande précédente, demande-lui ce qu'il veut.
 - UNE SEULE commande par appel. Toute correction passe par la commande en cours : changer une quantité = update_order_line (nouvelle quantité totale), retirer un produit = remove_order_line, changer la date = update_order, tout annuler = cancel_order. Ne crée jamais une 2e commande ni une 2e ligne du même produit pour corriger.
 - Avant confirm_order : annonce le récapitulatif (produits, quantités, prix HT, total, date de livraison), puis ATTENDS la réponse du client. Un « euh », « peut-être », « oui mais… » ou une question n'est pas un accord : reformule et redemande. Après toute modification, récapitule de nouveau.
 - Si confirm_order répond que la comptabilité doit valider (client bloqué, plafond de crédit), la commande reste en brouillon : ne promets rien, dis que Martine (comptabilité) rappelle. Tu n'as aucun moyen de lever ce blocage et tu ne dois pas en proposer.
 - Signale les alertes renvoyées par l'ERP (encours, client bloqué, stock insuffisant).
+- Ne promets JAMAIS ce qu'aucun outil ne garantit : pas d'heure ni de créneau de livraison (« avant 10 heures », « en fin de matinée »), pas d'e-mail, de SMS ou de bon de confirmation envoyé, pas de rappel, pas de geste commercial ni de remise inventés (seule exception : une offre de get_rescue_offers, ajoutée avec add_rescue_offer au prix calculé par l'ERP). Si le client le demande, dis honnêtement que tu ne peux pas le garantir, et propose ce que tu peux faire : noter sa demande dans son dossier (log_client_event, type special_request). La date de livraison de la commande, elle, tu peux la donner.
 - Réponds en français, de façon concise."""
 
 OUTBOUND_RULES = """Tu appelles un client de ta propre initiative (le dossier d'appel suit). Règles propres à cet appel :
@@ -64,20 +70,29 @@ MODE_RULES = {"chat": CHAT_RULES, "voice": VOICE_RULES, "command": COMMAND_RULES
 
 
 async def build_system_prompt(mode: ChatMode, actor_name: str | None = None, brief: str | None = None) -> str:
+    static, dynamic = await build_system_parts(mode, actor_name, brief)
+    return "\n\n".join(p for p in (static, dynamic) if p)
+
+
+async def build_system_parts(mode: ChatMode, actor_name: str | None = None, brief: str | None = None) -> tuple[str, str]:
+    """(static, dynamic). Static = identical for every conversation of a mode on a given day (cached once, shared);
+    dynamic = who is speaking and the outbound call brief ("" when there is none)."""
     meta = await get_meta()
     today = meta.get("today") or datetime.now(UTC).date().isoformat()
     company = meta.get("company") or "un grossiste alimentaire"
     trade = meta.get("trade") or company_trade()
-    parts = [
+    static = [
         ROLE.format(company=company, trade=f"Activité : {trade}" if trade else "C'est un grossiste alimentaire"),
         BASE_RULES,
         MODE_RULES[mode],
         f"Entreprise : {meta.get('company') or '(ERP injoignable)'}. Aujourd'hui : {french_date(today)} ({today}).",
-        f"Interlocuteur : {actor_name}." if actor_name else "",
-        f"# Appel sortant\n\n{OUTBOUND_RULES}\n\n{brief}" if brief else "",
         f"# Contexte entreprise\n\n{context}" if (context := read_context_files()) else "",
     ]
-    return "\n\n".join(p for p in parts if p)
+    dynamic = [
+        f"Interlocuteur : {actor_name}." if actor_name else "",
+        f"# Appel sortant\n\n{OUTBOUND_RULES}\n\n{brief}" if brief else "",
+    ]
+    return "\n\n".join(p for p in static if p), "\n\n".join(p for p in dynamic if p)
 
 
 _meta_cache: tuple[float, dict] | None = None

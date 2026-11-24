@@ -23,6 +23,9 @@ class LLMRequest:
     messages: list[ChatMessage]  # user / assistant (with tool_calls) / tool (with tool_call_id + name)
     tools: list[ToolInfo] = field(default_factory=list)
     max_tokens: int | None = None
+    # Optional: `system` cut into blocks (static first). Anthropic puts a cache breakpoint after each, so the static part is
+    # shared by every conversation; other providers just read `system` (the blocks joined).
+    system_blocks: list[str] | None = None
 
 
 @dataclass
@@ -78,6 +81,9 @@ class STTClient(ABC):
     # True when transcribe_stream() really transcribes while the audio arrives (real-time WebSocket):
     # the voice session then streams push-to-talk audio as it is recorded and shows partial transcripts.
     streams: bool = False
+    # True when listen() is implemented: hands-free, always-listening transcription with end-of-sentence detection
+    # (the phone bridge, services/phone.py, needs it: no push-to-talk on a phone).
+    listens: bool = False
 
     @abstractmethod
     async def transcribe(self, audio: bytes, mime: str, hint: str | None = None) -> str:
@@ -95,6 +101,16 @@ class STTClient(ABC):
         text = await self.transcribe(b"".join([chunk async for chunk in audio]), mime, hint)
         yield STTUpdate(text, final=True, stable=text)
 
+    async def listen(
+        self, audio: AsyncIterator[bytes], hint: str | None = None, *, audio_format: str = "mulaw", sample_rate: int = 8000,
+        endpoint_delay_ms: int = 800,
+    ) -> AsyncIterator[STTUpdate]:
+        """Hands-free: a continuous audio stream in (a phone line), and for EACH sentence of the caller: STTUpdate(final=False)
+        with the sentence heard so far while they speak, then one STTUpdate(final=True) with the whole sentence when they pause
+        (end-of-sentence detection). Runs until the audio ends. Only providers with `listens = True` implement it."""
+        raise NotImplementedError(f"{self.name} : pas d'écoute continue (choisissez STT_PROVIDER=soniox pour le téléphone)")
+        yield  # pragma: no cover  (makes this an async generator)
+
 
 @dataclass
 class TTSResult:
@@ -104,7 +120,11 @@ class TTSResult:
 
 class TTSClient(ABC):
     name: str
+    # Audio formats it can produce besides its default, for synthesize(audio_format=...). "ulaw_8000" = what a phone line
+    # carries (Twilio): raw μ-law 8 kHz mono, no header, sent as is (no transcoding).
+    formats: tuple[str, ...] = ()
 
     @abstractmethod
     async def synthesize(self, text: str, voice: str | None = None) -> TTSResult:
-        """Start synthesis; raise on HTTP errors, then stream the audio through `TTSResult.chunks`."""
+        """Start synthesis; raise on HTTP errors, then stream the audio through `TTSResult.chunks`.
+        Providers listing formats in `formats` also accept a keyword `audio_format`."""

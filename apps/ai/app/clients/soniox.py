@@ -17,6 +17,10 @@ The browser's WebM/Opus is accepted as is ("audio_format": "auto" detects webm, 
 
 Control tokens: <fin> answers a finalize; <end> marks the end of a sentence when the speaker pauses (endpoint
 detection — the hook for hands-free mode, see GUIDE-VOIX.md 4.2). Neither is spoken text.
+
+Hands-free (the phone, listen()): raw μ-law 8 kHz from Twilio ("audio_format": "mulaw", "sample_rate": 8000,
+"num_channels": 1), one socket for the whole call, and each <end> closes one sentence of the caller.
+"max_endpoint_delay_ms" (500–3000, default 2000) caps how long Soniox waits after speech before it says <end>.
 """
 
 import json
@@ -34,16 +38,18 @@ MAX_TERMS_CHARS = 6000  # context terms budget, first terms first (Soniox limits
 class SonioxSTT(STTClient):
     name = "soniox"
     streams = True
+    listens = True
 
     def __init__(self, api_key: str, model: str = "stt-rt-v6", language: str = "fr", connect: Callable = open_ws):
         self.api_key, self.model, self.language, self.connect = api_key, model, language, connect
 
-    def start_request(self, hint: str | None) -> dict:
+    def start_request(self, hint: str | None, raw: dict | None = None) -> dict:
         req: dict = {
             "model": self.model,
             "audio_format": "auto",
             "language_hints": [self.language],
             "enable_endpoint_detection": True,  # final words at each pause, not only at the end
+            **(raw or {}),  # phone: raw μ-law → {"audio_format": "mulaw", "sample_rate": 8000, "num_channels": 1, …}
         }
         terms, size = [], 0
         for t in (t.strip() for t in (hint or "").split(",")):
@@ -87,3 +93,38 @@ class SonioxSTT(STTClient):
                         return  # leaving the blocks closes the socket
                     yield STTUpdate((final + provisional).strip(), stable=final.strip())
         raise provider_error("soniox stt", "closed", "connection closed before the final words")
+
+    async def listen(
+        self, audio: AsyncIterator[bytes], hint: str | None = None, *, audio_format: str = "mulaw", sample_rate: int = 8000,
+        endpoint_delay_ms: int = 800,
+    ) -> AsyncIterator[STTUpdate]:
+        raw = {"audio_format": audio_format, "sample_rate": sample_rate, "num_channels": 1, "max_endpoint_delay_ms": endpoint_delay_ms}
+        async with self.connect(URL, {"Authorization": f"Bearer {self.api_key}"}, "soniox stt") as ws:
+            await ws.send(json.dumps(self.start_request(hint, raw)))
+            async with sending(ws, audio, end=""):  # an empty text frame ends the stream (when the call ends)
+                sentence = ""  # final words of the sentence in progress (each final token arrives once)
+                async for raw_msg in ws:
+                    msg = json.loads(raw_msg)
+                    if msg.get("error_code"):
+                        raise provider_error("soniox stt", msg["error_code"], f"{msg.get('error_type', '')}: {msg.get('error_message', '')}")
+                    provisional, done = "", []  # tokens in order: an <end> closes the sentence before it
+                    for tok in msg.get("tokens") or []:
+                        text = tok.get("text") or ""
+                        if text == "<end>":
+                            if sentence.strip():
+                                done.append(sentence.strip())
+                            sentence = ""
+                        elif text.startswith("<"):
+                            continue
+                        elif tok.get("is_final"):
+                            sentence += text
+                        else:
+                            provisional += text
+                    for heard in done:
+                        yield STTUpdate(heard, final=True, stable=heard)
+                    if (sentence + provisional).strip():
+                        yield STTUpdate((sentence + provisional).strip(), stable=sentence.strip())
+                    if msg.get("finished"):
+                        if sentence.strip():
+                            yield STTUpdate(sentence.strip(), final=True, stable=sentence.strip())
+                        return

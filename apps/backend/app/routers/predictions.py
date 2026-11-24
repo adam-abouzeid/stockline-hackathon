@@ -4,7 +4,18 @@ from fastapi import APIRouter, Query
 
 from app.dependencies import CtxDep, iso_date_query
 from app.schemas.domain import ClientEvent
-from app.schemas.predictions import OfferInput, RadarBacktest, SeasonRadar, StockRescue
+from app.schemas.views import OrderDetail
+from app.schemas.predictions import (
+    HolidayReservations,
+    OfferInput,
+    RadarBacktest,
+    RescueAcceptInput,
+    SeasonRadar,
+    Signal,
+    SignalsInput,
+    SignalsSaved,
+    StockRescue,
+)
 from app.services import predictions
 
 router = APIRouter(prefix="/api/predictions", tags=["predictions"])
@@ -45,3 +56,44 @@ async def propose_offer(body: OfferInput, ctx: CtxDep):
     """A seller marks an offer as proposed. Only writes a line in the client's history: no price, order or stock changes.
     Refused below cost."""
     return predictions.propose_offer(ctx, body.data())
+
+
+@router.post("/stock-rescue/accept", response_model=OrderDetail, status_code=201)
+async def accept_rescue_offer(body: RescueAcceptInput, ctx: CtxDep):
+    """The client accepted a rescue offer on a call (agent tool add_rescue_offer): the lot is added to its DRAFT order at the
+    rescue price, computed here (never sent by the caller) and refused below cost. The order still needs the client's explicit yes."""
+    return predictions.accept_rescue_offer(ctx, body.data())
+
+
+@router.get("/holiday-reservations", response_model=HolidayReservations)
+async def holiday_reservations(client_id: str | None = Query(None, alias="clientId")):
+    """Carnet de Noël: the « Fêtes <year> : réservation de volumes » notes of this season, each product estimated from the client's
+    own late-December purchases of past years, the AI signals read in the notes (×2, cancelled, asked for a deal), the historical
+    conversion of such notes into orders, and the products whose reservations exceed stock + incoming."""
+    return predictions.holiday_reservations(client_id)
+
+
+@router.get("/holiday-reservations/backtest")
+async def holiday_reservations_backtest(season: int = Query(..., description="A past season, e.g. 2025"), signals: bool = Query(True, description="Use the AI signals read in the notes")):
+    """The Carnet de Noël estimate of a past season (only history before it), compared with what those clients really bought
+    15–31 December: wape (weighted % error on units), share of lines within ±30 %, expected value vs real value."""
+    return predictions.reservations_backtest(season, signals)
+
+
+@router.get("/holiday-reservations/notes")
+async def holiday_reservation_notes(season: int | None = Query(None)):
+    """The raw reservation notes of a season (default: this one), for the AI service to read: [{eventId, clientId, clientName, text, productIds, productNames}]."""
+    return predictions.reservation_notes(season)
+
+
+@router.get("/signals", response_model=list[Signal])
+async def list_signals():
+    """What an LLM read in the client notes (one per note)."""
+    return predictions.list_signals()
+
+
+@router.put("/signals", response_model=SignalsSaved)
+async def save_signals(body: SignalsInput):
+    """Store what an LLM read in client notes (AI service, POST /insights/reservations/extract). Validated: the note exists,
+    multiplier 0–5. These signals never carry a quantity or a price: the ERP does the sums."""
+    return predictions.save_signals(body.data())

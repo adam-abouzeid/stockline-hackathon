@@ -18,8 +18,8 @@ import type {
   ClientPrice, PriceGridRow, PriceRule, PriceRuleInput, PriceRuleSummary, ResolvedPrice, TagDef,
 } from "@kit/shared";
 import type { Receivables } from "@kit/shared";
-import type { OfferInput, RadarBacktest, SeasonRadar, StockRescue } from "@kit/shared";
-import type { AutodialState, CallStatus, DispatchResult, ProactiveBrief, ProactiveCall, ProactiveOpportunity } from "@kit/shared";
+import type { HolidayReservations, OfferInput, RadarBacktest, ReservationsBacktest, ReservationsExtract, SeasonRadar, StockRescue } from "@kit/shared";
+import type { AutodialState, CallStatus, DispatchResult, PhoneConfig, ProactiveBrief, ProactiveCall, ProactiveOpportunity } from "@kit/shared";
 import type { Category } from "@kit/shared";
 import type { ContextEntry, ContextEntryInput, ContextEntrySummary, ContextForEntity, ContextScope } from "@kit/shared";
 import type { ListParams, Page } from "@kit/shared";
@@ -285,6 +285,12 @@ export const api = {
     dispatch: () => post<DispatchResult>("/proactive/dispatch"),
     autodial: () => get<AutodialState>("/proactive/autodial", undefined, { silent: true }),
     setAutodial: (enabled: boolean) => post<AutodialState>("/proactive/autodial", { enabled }),
+    /** AI service: can a real phone ring (PHONE_MODE=twilio)? check=true also asks Twilio and tries the tunnel. */
+    phone: async (check = false): Promise<PhoneConfig> => {
+      const res = await fetch(`${AI_BASE}/phone/config${check ? "?check=1" : ""}`);
+      if (!res.ok) throw new ApiRequestError(res.status, "phone", "Service IA injoignable");
+      return (await res.json()) as PhoneConfig;
+    },
   },
 
   predictions: {
@@ -294,6 +300,20 @@ export const api = {
     stockRescue: (p?: { horizonDays?: number }) => get<StockRescue>("/predictions/stock-rescue", p),
     /** Marks an offer as proposed: a line in the client's history, nothing else changes. */
     proposeOffer: (body: OfferInput) => post<ClientEvent>("/predictions/stock-rescue/offers", body),
+    /** Carnet de Noël: the written holiday reservations, estimated from each client's own past late-December purchases. */
+    holidayReservations: () => get<HolidayReservations>("/predictions/holiday-reservations"),
+    /** A past season's estimate judged on what clients really bought (with or without the AI signals). */
+    reservationsBacktest: (season: number, signals: boolean) => get<ReservationsBacktest>("/predictions/holiday-reservations/backtest", { season, signals }),
+    /** AI service: the LLM reads the reservation notes (rules without an LLM) and the ERP stores one signal per note. */
+    extractReservations: async (season?: number): Promise<ReservationsExtract> => {
+      const res = await fetch(`${AI_BASE}/insights/reservations/extract${season ? `?season=${season}` : ""}`, { method: "POST" });
+      if (!res.ok) {
+        const err = new ApiRequestError(res.status, "ai", "Analyse IA impossible (service IA injoignable ?)");
+        toast.error("Analyse IA impossible", err.message);
+        throw err;
+      }
+      return (await res.json()) as ReservationsExtract;
+    },
   },
 
   admin: {

@@ -151,7 +151,11 @@ def no_erp_prompt(monkeypatch):
     async def prompt(mode, actor_name=None):
         return "SYS"
 
+    async def parts(mode, actor_name=None, brief=None):
+        return "SYS", ""
+
     monkeypatch.setattr(agent_loop, "build_system_prompt", prompt)
+    monkeypatch.setattr(agent_loop, "build_system_parts", parts)
 
 
 async def run(steps, history=None, max_steps=None):

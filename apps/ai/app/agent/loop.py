@@ -35,7 +35,7 @@ from app.schemas import (
 from app.tools import ErpClient, Tool, ToolContext
 from app.tools.order_state import derive_state
 
-from .prompts import build_system_prompt
+from .prompts import build_system_parts, build_system_prompt  # noqa: F401  (build_system_prompt: kept for callers)
 
 GIVE_UP = "Désolé, je n'ai pas réussi à aller au bout. Pouvez-vous reformuler ?"
 
@@ -49,15 +49,17 @@ async def run_agent(
     actor_name: str | None = None,
     max_steps: int | None = None,
     brief: str | None = None,  # V3: outbound call brief, added to the system prompt
+    outbound_call: dict | None = None,  # V3: the outbound call in progress {opportunityId, callId} (tool record_call_outcome)
 ) -> AsyncIterator[ChatStreamEvent]:
     started = time.perf_counter()
     actor = "ai_chat" if mode == "chat" else "voice_agent"
-    ctx = ToolContext(erp=ErpClient(actor, actor_name), actor=actor, mode=mode, messages=messages, state=derive_state(messages))
+    ctx = ToolContext(erp=ErpClient(actor, actor_name), actor=actor, mode=mode, messages=messages, state=derive_state(messages), call=outbound_call)
     usage = Usage(input_tokens=0, output_tokens=0)
 
     try:
-        system = await (build_system_prompt(mode, actor_name, brief) if brief else build_system_prompt(mode, actor_name))
-        request = LLMRequest(system=system, messages=messages, tools=[t.info for t in tools])
+        static, dynamic = await build_system_parts(mode, actor_name, brief)
+        system = "\n\n".join(p for p in (static, dynamic) if p)
+        request = LLMRequest(system=system, messages=messages, tools=[t.info for t in tools], system_blocks=[static, dynamic] if dynamic else None)
         said_something = False
 
         for _step in range(max_steps or settings.max_steps):

@@ -3,10 +3,12 @@
  * the agent dials the client's real phone; in the demo this window simulates the client's phone: picking up ("Décrocher") opens the
  * Voix page and the agent speaks first. The click is also the user gesture the browser needs to play the agent's first words.
  * Nobody presses "call" on the agent's behalf.
+ * With PHONE_MODE=twilio the call rings on the REAL demo phone instead: this window then only says so (no pick-up buttons) and
+ * links to « Appels du jour », where the live panel shows the conversation.
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "react-router-dom";
-import { Phone, PhoneOff } from "lucide-react";
+import { Link, useNavigate } from "react-router-dom";
+import { Phone, PhoneOff, Smartphone } from "lucide-react";
 import { api } from "@/lib/api";
 import { Badge, Button, Dot } from "@/ui";
 
@@ -32,6 +34,22 @@ export function IncomingCall() {
 
   const call = data?.[0];
   if (!call) return null;
+  if (call.channel === "phone") {
+    return (
+      <div role="status" aria-label="Appel de l'agent en cours" className="fixed bottom-5 right-5 z-50 w-[360px] rounded-[8px] border border-violet/40 bg-card p-4 shadow-lg">
+        <div className="flex items-center gap-2 text-[11px] uppercase tracking-wide text-muted-foreground">
+          <Dot tone="violet" pulse /> Appel en cours vers le téléphone de démo
+        </div>
+        <div className="mt-2 flex items-center gap-2 text-[14px] font-medium">
+          <Smartphone size={15} strokeWidth={1.75} className="text-violet" /> L'agent appelle {call.clientName}
+        </div>
+        {call.contactName ? <div className="text-[12px] text-muted-foreground">{call.contactName}</div> : null}
+        <p className="mt-2 text-[12.5px]">{call.title}</p>
+        {call.deadline ? <Badge tone="warning" className="mt-2">{call.deadline}</Badge> : null}
+        <Link to="/proactive" className="mt-3 inline-block text-[12px] font-medium text-violet hover:underline">Suivre l'appel en direct</Link>
+      </div>
+    );
+  }
   return (
     <div role="alertdialog" aria-label="Appel entrant de l'agent" className="fixed bottom-5 right-5 z-50 w-[360px] rounded-[8px] border border-violet/40 bg-card p-4 shadow-lg">
       <div className="flex items-center gap-2 text-[11px] uppercase tracking-wide text-muted-foreground">

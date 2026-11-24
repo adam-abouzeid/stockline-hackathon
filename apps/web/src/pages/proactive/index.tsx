@@ -7,13 +7,16 @@
  *  - the calls already placed and their outcome.
  * "Vérifier maintenant" only runs one decision cycle right away instead of waiting for the next tick. Calls ring on whatever page is
  * open (see IncomingCall); orders still go through draft → recap → explicit "yes".
+ * With PHONE_MODE=twilio the call rings on the real demo phone: the page then shows whether the phone line is ready, and the live
+ * « Appel en cours » panel (live-call.tsx) with the conversation and the order changing.
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { CheckCircle2, PackageX, Pause, PhoneOutgoing, Play, RefreshCw, Truck } from "lucide-react";
+import { AlertTriangle, CheckCircle2, PackageX, Pause, PhoneOutgoing, Play, RefreshCw, Smartphone, Truck } from "lucide-react";
 import type { CallStatus, IssueKind, ProactiveCall, ProactiveOpportunity } from "@kit/shared";
 import { api } from "@/lib/api";
 import { Badge, Button, Dot, EmptyState, ErrorState, Page, PageBody, PageHeader, Section, Skeleton } from "@/ui";
+import { LiveCall } from "./live-call";
 
 const KIND: Record<IssueKind, { label: string; icon: typeof PackageX; does: string }> = {
   stock: { label: "Stock", icon: PackageX, does: "Expliquer la rupture et trouver une solution avec lui : attendre, retirer la ligne ou un produit équivalent s'il est d'accord." },
@@ -24,6 +27,7 @@ const STATUS: Record<CallStatus, { label: string; tone: "warning" | "success" | 
   answered: { label: "Décroché", tone: "success" },
   declined: { label: "Refusé", tone: "muted" },
   missed: { label: "Manqué", tone: "destructive" },
+  cancelled: { label: "Annulé", tone: "muted" },
 };
 const hhmm = (iso: string) => new Date(iso).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
 const urgent = (deadline: string) => /aujourd'hui|demain/i.test(deadline);
@@ -37,6 +41,10 @@ export default function ProactivePage() {
   const toggle = useMutation({ mutationFn: (enabled: boolean) => api.proactive.setAutodial(enabled), onSuccess: refresh });
   const cycle = useMutation({ mutationFn: () => api.proactive.dispatch(), onSuccess: refresh });
   const s = state.data;
+  const phoneMode = s?.phoneMode === "twilio";
+  const phone = useQuery({ queryKey: ["proactive", "phone"], queryFn: () => api.proactive.phone(), enabled: phoneMode, refetchInterval: 30000 });
+  const phoneCheck = useMutation({ mutationFn: () => api.proactive.phone(true) });
+  const phoneInfo = phoneCheck.data ?? phone.data;
   const callOf = (o: ProactiveOpportunity) => calls.data?.find((c) => c.opportunityId === o.id);
 
   return (
@@ -70,6 +78,35 @@ export default function ProactivePage() {
               </ul>
             </details>
           </div>
+
+          {phoneMode ? (
+            <Section
+              title="Appel en cours"
+              actions={
+                <Button size="sm" variant="ghost" icon={Smartphone} disabled={phoneCheck.isPending} onClick={() => phoneCheck.mutate()}>
+                  {phoneCheck.isPending ? "Vérification…" : "Tester la ligne"}
+                </Button>
+              }
+            >
+              <div className="flex flex-col gap-2.5">
+                {phoneInfo && !phoneInfo.ready ? (
+                  <div className="flex items-start gap-2 rounded-[6px] border border-warning/40 bg-warning/[.06] px-3 py-2 text-[12.5px]" role="alert">
+                    <AlertTriangle size={14} strokeWidth={1.75} className="mt-0.5 shrink-0 text-warning" />
+                    <div>
+                      <b className="font-medium">Le téléphone de démo ne peut pas sonner :</b>
+                      <ul className="mt-0.5 list-disc pl-5 text-muted-foreground">{phoneInfo.problems.map((p, i) => <li key={i}>{p}</li>)}</ul>
+                    </div>
+                  </div>
+                ) : phoneInfo ? (
+                  <p className="flex items-center gap-2 text-[12.5px] text-muted-foreground">
+                    <Dot tone="success" /> Ligne prête : les appels de l'agent font sonner le téléphone de démo{phoneInfo.demoNumber ? ` ${phoneInfo.demoNumber}` : ""}
+                    {phoneCheck.data ? " (Twilio et le tunnel répondent)" : ""}.
+                  </p>
+                ) : null}
+                <LiveCall />
+              </div>
+            </Section>
+          ) : null}
 
           <Section title="Clients à prévenir" count={queue.data?.length}>
             {queue.isLoading ? (
@@ -137,7 +174,9 @@ function CallRow({ c }: { c: ProactiveCall }) {
         <Link to={`/clients/${c.clientId}`} className="font-medium hover:underline">{c.clientName}</Link>
         <p className="text-muted-foreground">{c.title}</p>
         {c.outcome ? <p className="mt-0.5">Décision : {c.outcome}</p> : c.status === "answered" ? <p className="mt-0.5 text-muted-foreground">Appel en cours ou résultat pas encore noté.</p> : null}
+        {c.note && c.status !== "answered" ? <p className="mt-0.5 text-muted-foreground">{c.note}</p> : null}
       </div>
+      {c.channel === "phone" ? <Badge tone="violet"><Smartphone size={11} strokeWidth={1.75} /> téléphone</Badge> : null}
       <Badge tone={st.tone}>{st.label}</Badge>
     </li>
   );

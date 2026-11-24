@@ -64,6 +64,7 @@ export interface RescueClient {
   unitPrice: number;
   offerPrice: number;
   alreadyProposed: boolean;
+  askedForDeal?: string; // AI signal: this client asked for a deal in writing (why) → offered first
 }
 
 export interface RescueItem {
@@ -95,4 +96,100 @@ export interface OfferInput {
   qty: number;
   discountPct: number;
   offerPrice: number;
+}
+
+// ───────── Carnet de Noël: written holiday reservations, read by an LLM, estimated by arithmetic ─────────
+
+/** How the LLM read a note. firm = reserves; tentative = hesitates / a question / a condition; cancelled; unclear. */
+export type ReservationIntent = "firm" | "tentative" | "cancelled" | "unclear";
+
+export interface ReservationNote {
+  eventId: Id;
+  clientId: Id;
+  clientName: string;
+  at: IsoDate;
+  text: string;
+  quote?: string; // what the client said, as written
+  intent: ReservationIntent;
+  multiplier: number;
+  askedForDeal: boolean;
+  condition?: string;
+  aiSummary?: string;
+  analyzed: boolean; // an LLM (or the rules) has read it
+}
+
+export interface ReservationLine {
+  eventId: Id;
+  clientId: Id;
+  clientName: string;
+  productId: Id;
+  productName: string;
+  unit: string;
+  pastYears: { year: number; qty: number }[];
+  baselineQty?: number; // mean of the client's own late-December quantities; absent = no history
+  multiplier: number;
+  qty?: number;
+  unitPrice: number;
+  value?: number;
+  intent: ReservationIntent;
+  expectedValue: number;
+  ordered: boolean;
+}
+
+export interface ReservationProduct {
+  productId: Id;
+  productName: string;
+  unit: string;
+  reservedUnits: number;
+  available: number;
+  incoming: number;
+  shortfall: number;
+  supplierName?: string;
+  orderBy?: IsoDate;
+  late: boolean;
+}
+
+export interface HolidayReservations {
+  asOf: IsoDate;
+  season: number;
+  notes: ReservationNote[];
+  lines: ReservationLine[];
+  products: ReservationProduct[];
+  conversion: { rate?: number; converted: number; total: number; seasons: number[] };
+  totals: {
+    notes: number;
+    lines: number;
+    linesWithoutHistory: number;
+    reservedValue: number;
+    expectedValue: number;
+    orderedLines: number;
+    analyzedNotes: number;
+    shortProducts: number;
+  };
+}
+
+/** GET /api/predictions/holiday-reservations/backtest: a past season's estimate vs what clients really bought. */
+export interface ReservationsBacktest {
+  season: number;
+  useSignals: boolean;
+  lines: number;
+  linesBought: number;
+  notesToOrders?: number;
+  wape?: number; // weighted absolute % error on units, per line
+  within30Pct?: number;
+  predictedValue: number;
+  expectedValue: number;
+  actualValue: number;
+  valueError?: number; // (expected − actual) / actual
+}
+
+/** POST /ai/insights/reservations/extract */
+export interface ReservationsExtract {
+  season?: number;
+  notes: number;
+  saved: number;
+  model?: string;
+  byIntent: Partial<Record<ReservationIntent, number>>;
+  doubled?: number;
+  askedForDeal: number;
 }

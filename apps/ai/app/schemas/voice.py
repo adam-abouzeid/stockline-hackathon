@@ -55,6 +55,7 @@ class OutboundMessage(WireModel):
 
     type: Literal["outbound"] = "outbound"
     opportunity_id: str
+    call_id: str | None = None  # the call of the journal that was picked up, when known
 
 
 VoiceClientMessage = Annotated[

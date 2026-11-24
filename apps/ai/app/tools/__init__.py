@@ -9,11 +9,13 @@ The tools the model can call, grouped by domain. Each one wraps ERP API endpoint
     orders.py    create_draft_order, add_order_line, confirm_order, get_order
     order_edit.py update_order_line, remove_order_line, update_order, cancel_order (V1: edit / cancel the active order)
     reorder.py    reorder_last_order (V2: « comme la dernière fois » in one gesture)
+    calls.py      record_call_outcome (V3: the decision taken on a call the agent placed)
+    predictions.py get_holiday_reservation, get_rescue_offers, add_rescue_offer (V2 predictions, price set by the ERP)
 
 A new file needs one more line: import it below so its @tool functions get registered.
 """
 
-from . import catalog, context, history, order_edit, orders, reorder  # noqa: F401  (importing registers the tools)
+from . import calls, catalog, context, history, order_edit, orders, predictions, reorder  # noqa: F401  (importing registers the tools)
 from .erp import ErpClient
 from .registry import TOOLS, Tool, ToolContext, tool
 

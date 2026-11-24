@@ -19,6 +19,7 @@ to build the best voice agent on top of it (smart, fast, natural).
 | [TECH.md](TECH.md) | the detailed technical guide (French): request flows, backend layering, every endpoint, agent loop, `@tool` internals, frontend data flow, known pitfalls, worked extension examples |
 | [GUIDE-AGENTS.md](GUIDE-AGENTS.md) | the teaching guide (French): agent concepts (loop, harness, tools, context, prompt caching, models, Jev, evaluation, pitfalls) mapped to the kit's code |
 | [apps/ai/README.md](apps/ai/README.md) | the agent loop, tools, providers, the voice WebSocket protocol |
+| [SETUP-TELEPHONE.md](SETUP-TELEPHONE.md) | real phone calls for « Appels du jour » (Twilio, `PHONE_MODE`): setup, line check, rehearsal, troubleshooting |
 | [GUIDE-VOIX.md](GUIDE-VOIX.md) | voice-agent guide (French): latency metrics, the kit's measured numbers, speed and naturalness techniques mapped to the files to change |
 | [DESIGN.md](DESIGN.md) | the web design system (only when touching `apps/web`) |
 

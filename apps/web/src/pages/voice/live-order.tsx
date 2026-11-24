@@ -34,7 +34,7 @@ export function LiveOrder() {
   );
 }
 
-function OrderBody({ order }: { order: NonNullable<ReturnType<typeof useOrder>["data"]> }) {
+export function OrderBody({ order }: { order: NonNullable<ReturnType<typeof useOrder>["data"]> }) {
   const blocking = order.warnings.filter((w) => BLOCKING.includes(w.code));
   const needsHuman = order.status === "draft" && blocking.length > 0;
   const total = order.lines.reduce((s, l) => s + l.qty * l.unitPrice, 0);
@@ -88,7 +88,7 @@ function OrderBody({ order }: { order: NonNullable<ReturnType<typeof useOrder>["
 
       {order.warnings.length > blocking.length ? (
         <div className="flex flex-wrap gap-1">
-          {order.warnings.filter((w) => !BLOCKING.includes(w.code)).map((w, i) => <Badge key={i} tone="warning">{w.message}</Badge>)}
+          {order.warnings.filter((w) => !BLOCKING.includes(w.code)).map((w, i) => <Badge key={i} tone="warning" className="h-auto whitespace-normal py-0.5">{w.message}</Badge>)}
         </div>
       ) : null}
     </div>

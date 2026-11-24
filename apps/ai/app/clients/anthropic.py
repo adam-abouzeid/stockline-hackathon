@@ -8,9 +8,10 @@ Differences with OpenAI:
   - recent Claude models think: their `thinking` blocks must be sent back unchanged with the
     assistant turn that called tools, so we remember them by tool-call id.
 
-Prompt caching: the prefix tools → system → messages is cached with 3 `cache_control` breakpoints
-(last tool, system block, last block of the last message), so the next model call of the same turn
-(after a tool) and the next turn re-read it at ~10% of the price. The prefix must stay byte-identical:
+Prompt caching: the prefix tools → system → messages is cached with up to 4 `cache_control` breakpoints
+(last tool, the static system block, the per-conversation system block (outbound brief) when there is one,
+last block of the last message), so the next model call of the same turn (after a tool) and the next turn
+re-read it at ~10% of the price, and a NEW conversation re-reads the static part (company context) too. The prefix must stay byte-identical:
 tools in a fixed order, no timestamp / id in the system prompt, thinking blocks replayed unchanged.
 Hits show up as `cache_read_input_tokens` in the usage.
 """
@@ -24,7 +25,7 @@ from app.schemas import ChatMessage, ToolCall
 from .base import LLMClient, LLMEvent, LLMRequest, LLMText, LLMToolCall, LLMUsage
 from .http import ProviderError, http_client, parse_args, post_stream, sse_json
 
-CACHE = {"type": "ephemeral"}  # 5-minute prompt cache breakpoint (max 4 per request; we use 3)
+CACHE = {"type": "ephemeral"}  # 5-minute prompt cache breakpoint (max 4 per request; we use 3 or 4)
 
 # thinking blocks of an assistant turn, keyed by the id of its first tool call
 _thinking_by_call: dict[str, list[dict]] = {}
@@ -52,7 +53,12 @@ class AnthropicLLM(LLMClient):
             "stream": True,
             "messages": messages,
         }
-        if req.system:  # a list of blocks so it can carry a cache breakpoint
+        blocks = [b for b in (req.system_blocks or []) if b.strip()]
+        if blocks:  # static first, then the conversation's own part: one breakpoint after each
+            body["system"] = [{"type": "text", "text": b, "cache_control": CACHE} for b in blocks[:2]]
+            if len(blocks) > 2:  # never more than 2 system breakpoints (4 max per request)
+                body["system"][-1]["text"] = "\n\n".join(blocks[1:])
+        elif req.system:  # a list of blocks so it can carry a cache breakpoint
             body["system"] = [{"type": "text", "text": req.system, "cache_control": CACHE}]
         if self.effort:
             body["output_config"] = {"effort": self.effort}

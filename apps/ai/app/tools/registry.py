@@ -39,6 +39,7 @@ class ToolContext:
     mode: str = "chat"  # chat | voice | command
     messages: list | None = None  # the conversation so far (the live list the agent loop appends to)
     state: Any = None  # OrderState: the active order of this conversation, rebuilt from `messages` each turn
+    call: dict | None = None  # V3: the outbound call in progress {"opportunityId", "callId"} (tools/calls.py), None otherwise
 
 
 class ToolArgs(BaseModel):

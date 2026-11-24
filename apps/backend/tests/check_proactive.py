@@ -77,7 +77,8 @@ if stock:
     check("the brief forbids invented promises, prices, unapproved substitutions and other topics", "INTERDIT" in text and "sans son accord" in text and "d'autre chose que de ce problème" in text)
     check("the brief says what to do if the client has no time (the essential in one sentence)", "n'a pas le temps" in text)
     check("a commercial's note about substitutions reaches the agent", "substitution" in text.lower())
-    check("a prepared order is flagged as no longer editable", "DÉJÀ PRÉPARÉE" in text and "log_client_event" in text)
+    check("a prepared order is flagged as no longer editable", "DÉJÀ PRÉPARÉE" in text and "record_call_outcome" in text)
+    check("the brief tells the agent to record the outcome with the dedicated tool", "record_call_outcome" in text)
     check("no double full stop in the facts", not re.search(r"\.\.", text))
 
 both = [o for o in opps if "delivery" in o["kinds"]]
@@ -129,6 +130,24 @@ if second:
     check("the journal shows what was decided (the line the agent wrote in the client's history)", mine["outcome"] == "le client attend le prochain arrivage", str(mine.get("outcome")))
     s, d4 = call("/proactive/dispatch", "POST")
     check("a client already called today is not called again", d4["status"] == "nothing" or d4["call"]["clientId"] != second["clientId"])
+    # the dedicated outcome route (tool record_call_outcome): stored on the call, ONE history line, updated (not duplicated) on a 2nd call
+    s, out = call("/proactive/opportunities/" + urllib.parse.quote(second["opportunityId"], safe="") + "/outcome", "POST", {"decision": "Livraison décalée au jeudi 24.", "callId": second["id"]})
+    check("record_call_outcome stores the decision on the call", s == 200 and out["call"]["outcome"] == "Livraison décalée au jeudi 24", str(out)[:160])
+    s, out2 = call("/proactive/opportunities/" + urllib.parse.quote(second["opportunityId"], safe="") + "/outcome", "POST", {"decision": "Livraison décalée au jeudi 24, confirmée"})
+    check("recording again updates the same history line (no duplicate)", s == 200 and out2["eventId"] == out["eventId"])
+    s, evs = call(f"/clients/{second['clientId']}/events?type=call&limit=50")
+    check("the history line reads « Appel proactif : <decision> »", any(e["id"] == out["eventId"] and e["title"] == "Appel proactif : Livraison décalée au jeudi 24, confirmée" for e in evs))
+    s, bad = call("/proactive/opportunities/" + urllib.parse.quote(second["opportunityId"], safe="") + "/outcome", "POST", {"decision": "  "})
+    check("an empty decision is refused", s == 400, str(s))
+# pausing hangs up a call that is still ringing
+call("/proactive/calls", "DELETE")
+s, d5 = call("/proactive/dispatch", "POST")
+if d5 and d5.get("status") == "ringing":
+    call("/proactive/autodial", "POST", {"enabled": False})
+    s, c5 = call(f"/proactive/calls/{d5['call']['id']}")
+    check("pausing the agent cancels the call that was ringing", c5["status"] == "cancelled" and c5.get("note"), str(c5.get("status")))
+s, st0 = call("/proactive/autodial")
+check("the phone mode is exposed (simulator or twilio)", st0.get("phoneMode") in ("simulator", "twilio"))
 s, _x = call("/proactive/calls/does-not-exist/answer", "POST")
 check("an unknown call is a 404", s == 404, str(s))
 s, st2 = call("/proactive/autodial")

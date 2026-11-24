@@ -1,5 +1,7 @@
 """Predictions: the season radar (coming demand peaks) and stock to rescue (lots that will not sell before their ERP end date)."""
 
+from typing import Literal
+
 from app.schemas.base import Input, Schema
 
 # ───────── Season radar ─────────
@@ -91,6 +93,7 @@ class RescueClient(Schema):
     unit_price: float
     offer_price: float
     already_proposed: bool
+    asked_for_deal: str | None = None  # AI signal: this client asked for a deal in writing (why) → offered first
 
 
 class RescueItem(Schema):
@@ -124,3 +127,131 @@ class OfferInput(Input):
     qty: float
     discount_pct: float
     offer_price: float
+
+
+# ───────── AI signals and the Carnet de Noël (holiday reservations) ─────────
+
+Intent = Literal["firm", "tentative", "cancelled", "unclear"]
+
+
+class SignalIn(Input):
+    """What an LLM read in ONE client note. It never gives a quantity or a price: only how to read the note."""
+
+    event_id: str
+    intent: Intent  # firm = « réservez », tentative = « peut-être / si… », cancelled = « finalement non », unclear = nothing to read
+    multiplier: float = 1  # « mettez le double » → 2 (0–5)
+    dropped_product_ids: list[str] = []  # products of the note the client took back
+    asked_for_deal: bool = False  # « vous me faites un geste ? », « plus cher que le voisin »
+    condition: str | None = None  # « si le beau temps se maintient »
+    summary: str | None = None  # one short sentence, French
+
+
+class SignalsInput(Input):
+    signals: list[SignalIn]
+    model: str | None = None  # which model read them
+
+
+class Signal(Schema):
+    event_id: str
+    client_id: str
+    intent: Intent
+    multiplier: float
+    dropped_product_ids: list[str]
+    asked_for_deal: bool
+    condition: str | None = None
+    summary: str
+    model: str
+    at: str
+
+
+class SignalsSaved(Schema):
+    saved: int
+    signals: list[Signal]
+
+
+class ReservationNote(Schema):
+    event_id: str
+    client_id: str
+    client_name: str
+    at: str
+    text: str
+    quote: str | None = None  # what the client said, as written
+    intent: Intent
+    multiplier: float
+    asked_for_deal: bool
+    condition: str | None = None
+    ai_summary: str | None = None
+    analyzed: bool  # an LLM has read this note
+
+
+class PastYear(Schema):
+    year: int
+    qty: float
+
+
+class ReservationLine(Schema):
+    event_id: str
+    client_id: str
+    client_name: str
+    product_id: str
+    product_name: str
+    unit: str
+    past_years: list[PastYear]  # the client's own deliveries of this product, 15–31 December
+    baseline_qty: int | None = None  # mean of those years; None = no history (ask the client)
+    multiplier: float
+    qty: float | None = None  # baseline × multiplier (0 if cancelled)
+    unit_price: float  # the client's price (negotiated, group and volume rules)
+    value: float | None = None
+    intent: Intent
+    expected_value: float  # value, 0 if cancelled (measured: reserved lines are bought at ~1.0x their estimate)
+    ordered: bool  # an order already covers it
+
+
+class ReservationProduct(Schema):
+    product_id: str
+    product_name: str
+    unit: str
+    reserved_units: float
+    available: float
+    incoming: float
+    shortfall: float  # reserved − (available + incoming), never negative
+    supplier_name: str | None = None
+    order_by: str | None = None  # to have it by 23 December, given the supplier's lead time
+    late: bool
+
+
+class Conversion(Schema):
+    rate: float | None = None
+    converted: int
+    total: int
+    seasons: list[int]
+
+
+class ReservationTotals(Schema):
+    notes: int
+    lines: int
+    lines_without_history: int
+    reserved_value: float
+    expected_value: float
+    ordered_lines: int
+    analyzed_notes: int
+    short_products: int
+
+
+class HolidayReservations(Schema):
+    as_of: str
+    season: int
+    notes: list[ReservationNote]
+    lines: list[ReservationLine]
+    products: list[ReservationProduct]
+    conversion: Conversion
+    totals: ReservationTotals
+
+
+class RescueAcceptInput(Input):
+    """The client accepted a rescue offer on a call: add it to its draft order at the rescue price (computed by the ERP)."""
+
+    client_id: str
+    product_id: str
+    order_id: str
+    qty: float | None = None  # default: the suggested quantity

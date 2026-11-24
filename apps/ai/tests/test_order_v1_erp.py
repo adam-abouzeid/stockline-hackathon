@@ -120,7 +120,11 @@ def no_prompt_lookup(monkeypatch):
     async def prompt(mode, actor_name=None):
         return "SYS"
 
+    async def parts(mode, actor_name=None, brief=None):
+        return "SYS", ""
+
     monkeypatch.setattr(agent_loop, "build_system_prompt", prompt)
+    monkeypatch.setattr(agent_loop, "build_system_parts", parts)
 
 
 def lines_of(order: dict) -> list[tuple[str, float]]:

@@ -57,6 +57,24 @@ class JevSettings:
 
 
 @dataclass(frozen=True)
+class PhoneSettings:
+    """Real phone calls (V3 Appels du jour) through Twilio. Every call goes to ONE demo number, never to a client's number."""
+
+    mode: str  # simulator (default: the web app plays the client's phone) | twilio (a real phone rings)
+    account_sid: str
+    auth_token: str
+    from_number: str  # TWILIO_FROM: the Twilio number that calls (E.164, e.g. +15551234567)
+    to_number: str  # DEMO_PHONE_TO: the ONLY number ever dialled (E.164, e.g. +33612345678)
+    public_url: str  # PUBLIC_URL: https://<tunnel> that reaches this service (ngrok / cloudflared to port 4100)
+    validate_signature: bool  # check X-Twilio-Signature on Twilio's HTTP callbacks
+    ring_timeout: int  # seconds the phone rings before Twilio gives up (no-answer → « Manqué »)
+    endpoint_delay_ms: int  # Soniox max_endpoint_delay_ms: how long a pause ends the caller's sentence (500–3000)
+    barge_in_words: int  # words the caller must say over the agent to interrupt it (1 = any word)
+    max_call_seconds: int  # safety net: hang up after this long
+    machine_detection: bool  # Twilio async answering-machine detection: hang up on a voicemail (marked « Manqué »)
+
+
+@dataclass(frozen=True)
 class Settings:
     port: int
     erp_api_url: str
@@ -66,6 +84,7 @@ class Settings:
     stt: STTSettings
     tts: TTSSettings
     jev: JevSettings  # optional decision model, used next to the LLM (clients/jev.py)
+    phone: PhoneSettings
 
 
 settings = Settings(
@@ -98,5 +117,19 @@ settings = Settings(
         api_key=env("JEV_API_KEY"),
         base_url=env("JEV_BASE_URL", "https://api.typesafe.ai").rstrip("/"),
         model=env("JEV_MODEL", "jev-latest"),
+    ),
+    phone=PhoneSettings(
+        mode=env("PHONE_MODE", "simulator").lower(),
+        account_sid=env("TWILIO_ACCOUNT_SID"),
+        auth_token=env("TWILIO_AUTH_TOKEN"),
+        from_number=env("TWILIO_FROM").replace(" ", ""),
+        to_number=env("DEMO_PHONE_TO").replace(" ", ""),
+        public_url=env("PUBLIC_URL").rstrip("/"),
+        validate_signature=env("TWILIO_VALIDATE_SIGNATURE", "1") != "0",
+        ring_timeout=int(env("PHONE_RING_TIMEOUT", "30")),
+        endpoint_delay_ms=min(3000, max(500, int(env("PHONE_ENDPOINT_DELAY_MS", "800")))),
+        barge_in_words=max(1, int(env("PHONE_BARGE_IN_WORDS", "2"))),
+        max_call_seconds=int(env("PHONE_MAX_CALL_SECONDS", "420")),
+        machine_detection=env("PHONE_MACHINE_DETECTION", "0") == "1",
     ),
 )

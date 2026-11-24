@@ -5,10 +5,10 @@
  *  3. the existing low-stock rule (the stockout engine of the team plugs in here).
  * Everything is read from /api/predictions/* and the dashboard; the only write is "offer proposed" (a client-history line).
  */
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { CalendarClock, PackageCheck, TrendingUp } from "lucide-react";
-import type { RescueClient, RescueItem, SeasonPeak, SupplierBasket } from "@kit/shared";
+import { CalendarClock, Gift, PackageCheck, Sparkles, TrendingUp } from "lucide-react";
+import type { ReservationIntent, ReservationLine, ReservationNote, RescueClient, RescueItem, SeasonPeak, SupplierBasket } from "@kit/shared";
 import { api } from "@/lib/api";
 import { businessToday } from "@/lib/clock";
 import { fmtDate, fmtMoney } from "@/lib/format";
@@ -30,6 +30,7 @@ export default function PredictionsPage() {
       <PageBody>
         <div className="mx-auto flex max-w-[1080px] flex-col gap-8">
           <Radar />
+          <Carnet />
           <Rescue />
           <LowStock />
         </div>
@@ -163,6 +164,7 @@ function RescueCard({ item: i }: { item: RescueItem }) {
           {i.clients.map((c) => (
             <li key={c.clientId} className="flex flex-wrap items-center gap-x-4 gap-y-1 px-3 py-1.5 text-[12.5px]">
               <Link to={`/clients/${c.clientId}`} className="min-w-[200px] flex-1 font-medium hover:underline">{c.clientName}</Link>
+              {c.askedForDeal ? <span title={c.askedForDeal}><Badge tone="violet"><Sparkles size={11} strokeWidth={1.75} /> a demandé un geste</Badge></span> : null}
               <span className="num text-muted-foreground">{c.ordersLast90d} commandes en 90 j</span>
               <span className="num">{num(c.suggestedQty)} × {fmtMoney(c.offerPrice)} <s className="text-muted-foreground">{fmtMoney(c.unitPrice)}</s></span>
               {c.alreadyProposed ? (
@@ -177,6 +179,115 @@ function RescueCard({ item: i }: { item: RescueItem }) {
         </ul>
       )}
     </div>
+  );
+}
+
+// ───────── Carnet de Noël: written holiday reservations ─────────
+
+const INTENT: Record<ReservationIntent, { label: string; tone: "success" | "warning" | "destructive" | "muted" }> = {
+  firm: { label: "Réserve", tone: "success" },
+  tentative: { label: "Hésite", tone: "warning" },
+  cancelled: { label: "Annule", tone: "destructive" },
+  unclear: { label: "Pas encore lue", tone: "muted" },
+};
+
+function Carnet() {
+  const qc = useQueryClient();
+  const q = useQuery({ queryKey: ["predictions", "carnet"], queryFn: () => api.predictions.holidayReservations() });
+  const season = q.data?.season;
+  const proof = useQuery({
+    queryKey: ["predictions", "carnet-backtest", season],
+    queryFn: () => api.predictions.reservationsBacktest(season! - 1, true),
+    enabled: !!season,
+  });
+  const analyze = useMutation({
+    mutationFn: () => api.predictions.extractReservations(),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["predictions"] }),
+  });
+  const d = q.data;
+  const linesOf = (n: ReservationNote) => d?.lines.filter((l) => l.eventId === n.eventId) ?? [];
+  const b = proof.data;
+
+  return (
+    <Section
+      title="Carnet de Noël : réservations écrites, pas encore commandées"
+      count={d?.totals.notes}
+      actions={
+        <Button size="sm" icon={Sparkles} disabled={analyze.isPending || !d} onClick={() => analyze.mutate()}>
+          {analyze.isPending ? "L'IA lit les notes…" : d?.totals.analyzedNotes ? "Relire les notes avec l'IA" : "Analyser les notes avec l'IA"}
+        </Button>
+      }
+    >
+      {q.isLoading ? (
+        <Skeleton className="h-40 w-full" />
+      ) : q.isError || !d ? (
+        <ErrorState onRetry={() => q.refetch()} />
+      ) : d.notes.length === 0 ? (
+        <EmptyState compact icon={Gift} title="Aucune réservation écrite cette saison" description="Les notes « Fêtes … : réservation de volumes » des commerciaux apparaîtront ici." />
+      ) : (
+        <div className="flex flex-col gap-3">
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+            <Fact label="Valeur réservée (HT)">{fmtMoney(d.totals.expectedValue)}</Fact>
+            <Fact label="Lignes produit">{d.totals.lines} dont {d.totals.linesWithoutHistory} sans historique</Fact>
+            <Fact label="Notes devenues commandes">{pct(d.conversion.rate)} ({d.conversion.seasons.join("–")})</Fact>
+            <Fact label="Précision mesurée">
+              {b?.valueError !== undefined ? `${b.valueError > 0 ? "+" : ""}${Math.round(b.valueError * 100)} % sur ${b.season}` : "…"}
+            </Fact>
+          </div>
+          <p className="text-[12px] text-muted-foreground">
+            Chaque ligne est estimée à partir de ce que CE client a pris du 15 au 31 décembre les années passées (l'ERP fait le calcul).
+            L'IA lit seulement ce que le client a écrit : un changement d'avis (« mettez le double ! »), une annulation, une hésitation, une demande de geste.
+            {b ? ` Vérifié sur ${b.season} : estimation ${fmtMoney(b.expectedValue)}, réellement commandé ${fmtMoney(b.actualValue)}.` : ""}
+            {analyze.data ? ` Dernière lecture : ${analyze.data.saved} notes par ${analyze.data.model}.` : ""}
+          </p>
+          {d.products.some((p) => p.shortfall > 0) ? (
+            <ul className="flex flex-col gap-1">
+              {d.products.filter((p) => p.shortfall > 0).map((p) => (
+                <li key={p.productId} className="text-[12.5px]">
+                  <Badge tone={p.late ? "destructive" : "warning"}>Stock insuffisant</Badge>{" "}
+                  <Link to={`/products/${p.productId}`} className="font-medium hover:underline">{p.productName}</Link> : {num(p.reservedUnits)} réservés,{" "}
+                  {num(p.available + p.incoming)} en stock ou en route, il manque {num(p.shortfall)} {p.unit}
+                  {p.orderBy ? ` (commander chez ${p.supplierName ?? "le fournisseur"} avant ${fmtDate(p.orderBy)})` : ""}.
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-[12.5px] text-muted-foreground">Le stock et les arrivages couvrent toutes les réservations.</p>
+          )}
+          <ul className="divide-y divide-border rounded-[6px] border border-border">
+            {d.notes.map((n) => <NoteRow key={n.eventId} n={n} lines={linesOf(n)} />)}
+          </ul>
+        </div>
+      )}
+    </Section>
+  );
+}
+
+function NoteRow({ n, lines }: { n: ReservationNote; lines: ReservationLine[] }) {
+  const it = INTENT[n.analyzed ? n.intent : "unclear"];
+  const value = lines.reduce((s, l) => s + l.expectedValue, 0);
+  return (
+    <li className="flex flex-col gap-1 px-3 py-2 text-[12.5px]">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <Link to={`/clients/${n.clientId}`} className="font-medium hover:underline">{n.clientName}</Link>
+        <Badge tone={it.tone}>{it.label}</Badge>
+        {n.multiplier !== 1 ? <Badge tone="violet">×{num(n.multiplier)}</Badge> : null}
+        {n.askedForDeal ? <Badge tone="violet">demande un geste</Badge> : null}
+        <span className="num ml-auto">{fmtMoney(value)}</span>
+      </div>
+      {n.quote ? <p className="text-muted-foreground">« {n.quote} »{n.aiSummary ? <span className="text-foreground"> → {n.aiSummary}</span> : null}</p> : null}
+      <p className="text-[12px] text-muted-foreground">
+        {lines.map((l, i) => (
+          <span key={l.productId}>
+            {i ? " · " : ""}
+            {l.qty !== undefined ? `${num(l.qty)} × ` : ""}
+            {l.productName}
+            {l.baselineQty === undefined ? " (pas d'historique : à demander)" : l.pastYears.length ? ` (${l.pastYears.map((p) => `${p.year} : ${num(p.qty)}`).join(", ")})` : ""}
+            {l.ordered ? " — déjà commandé" : ""}
+          </span>
+        ))}
+      </p>
+    </li>
   );
 }
 

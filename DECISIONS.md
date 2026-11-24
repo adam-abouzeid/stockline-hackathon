@@ -69,3 +69,39 @@ interruption recovery, cost per successful scenario.
 - Still LLM-only: delivery-date promises ("avant 10 h"), "I will send the e-mail", substitution consent, stock-out handling.
 - A blocked client's request is traced for Martine only if a draft exists or the model logs it.
 - Not measured: the effect on latency and token cost of 4 more tools and a longer prompt.
+
+## 5. Live phone calls (Twilio) and the pre-demo fixes — 2026-11-24
+
+| Decision | Why |
+|---|---|
+| `PHONE_MODE=simulator\|twilio`; in twilio mode the backend asks the AI service (`POST /phone/calls`) to ring **only** `DEMO_PHONE_TO` | A real ring is the demo's wow; the simulator stays one setting away as the fallback; a real client can never be dialled |
+| The phone bridge (`services/phone.py`) **subclasses `VoiceConnection`**: same turns, agent, tools, approval gate and cancellation as the browser; only the transport changes | No business or conversation logic duplicated; the browser path is untouched |
+| The **opening is generated while the phone rings** (brief → LLM → μ-law TTS, queued) and plays at pickup | First words ≈ network latency after pickup instead of LLM + TTS latency (fake-Twilio rehearsal: 0.37 s) |
+| Hands-free turn taking from Soniox endpoint detection (`<end>`, `max_endpoint_delay_ms`=800); barge-in = ≥ 2 real words over the agent → Twilio `clear` + turn cancelled; shorter sounds while the agent talks are ignored | « Allô ? » at pickup must not cut the opening; a real interruption must stop the agent at once |
+| The agent hangs up itself once `record_call_outcome` ran and its goodbye was heard (Twilio `mark`) | A clean end on stage, no awkward silence |
+| Dial failures are written on the call (« Manqué » + reason) within seconds | On stage, a phone that does not ring must say why |
+| Fix 1: system prompt = static part (rules + company context, cached, shared by every call) then the per-call brief, each with its own Anthropic cache breakpoint | A new call no longer pays ~10k uncached tokens |
+| Fix 2: no invented promises (hour, e-mail, callback, discount) in BASE_RULES, every mode | It was only in the outbound brief |
+| Fix 3: `record_call_outcome` tool + `POST /api/proactive/opportunities/{id}/outcome` | The journal no longer depends on how the model words a title |
+| Fix 4–7: call journal in SQLite (cleared by reset); pause cancels a ringing call; `PROACTIVE_AUTODIAL=0` for the demo; same urgency → bigger order first | Demo safety |
+
+## 6. V2 predictions with AI (Carnet de Noël) — 2026-11-24
+
+The V2 predictions were pure arithmetic and the agent never used them. What was added, and what was **measured**:
+
+- **Carnet de Noël** (`GET /api/predictions/holiday-reservations`): the 30 « Fêtes 2026 : réservation de volumes » notes
+  (60 product lines, 14 without history) that nobody entered as orders, each line estimated from the client's own
+  15–31 December purchases of the past 3 years. About €33–36k excl. VAT, depending on the AI reading.
+- **The LLM reads the notes** (`POST /ai/insights/reservations/extract`, structured tool output, rules as fallback): firm /
+  tentative / cancelled, an explicit ×2, dropped products, a client asking for a deal. It never gives a quantity or a price.
+- **Backtest** (`/holiday-reservations/backtest?season=2025&signals=true|false`): the expected value is now within
+  **+3.5 % (2025)** and **−8.9 % (2024)** of what clients really bought. The first version discounted by the notes-to-orders
+  rate and was off by −17 % / −53 %: removed, because reserved lines are bought at ~1.0× their estimate.
+- **Honest limit:** in this data the clients' quotes do not predict the quantities (« et si j'en prends le double ? » was
+  followed by 0.3× to 6×), so the AI signals do **not** improve the line-level error (WAPE 0.53 with or without). The LLM's
+  value is reading intent and price sensitivity, not forecasting numbers.
+- **Pricing:** in the stock to rescue, clients who asked for a deal in writing (AI signal) are offered first. The agent can
+  read rescue offers (`get_rescue_offers`) and add an accepted one (`add_rescue_offer`) at a price **computed and checked by
+  the ERP** (`POST /api/predictions/stock-rescue/accept`: listed buyers only, draft orders only, never below cost); it counts
+  as an order change, so the recap and the explicit « oui » are required again. In proactive calls this is off unless
+  `PROACTIVE_RESCUE_OFFERS=1`.

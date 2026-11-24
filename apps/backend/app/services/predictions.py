@@ -8,6 +8,13 @@ Predictions for the sellers: two interpretable, training-free views built on the
   with the clients who buy that product and a discount that never goes below cost. Offers are drafts: a seller
   marks one as proposed, which only writes a line in the client's history.
 
+* Carnet de Noël (holiday reservations): the « Fêtes <year> : réservation de volumes » notes clients wrote, which nobody
+  entered as orders. The arithmetic estimates each line from the client's OWN late-December purchases of past years and
+  the historical share of such notes that became orders; an LLM (AI service, POST /insights/reservations/extract) only
+  READS the notes and stores signals here (`prediction_signals`): a change of mind (« finalement, mettez le double ! » → ×2),
+  a cancellation, a condition, a client asking for a deal. The LLM never computes a quantity or a price.
+* AI signals also feed the pricing side: in the stock to rescue, clients who asked for a deal in writing come first.
+
 Both take the business date from `today()` (never the wall clock). The radar can also be asked "as of" an earlier
 day, using only the data before it, to be judged on what really happened (`radar_backtest`).
 """
@@ -16,14 +23,16 @@ from __future__ import annotations
 
 import datetime as dt
 import math
+import re
 import statistics
 from collections import defaultdict
 
 from app import crud
 from app.core.activity import Ctx, today
-from app.core.db import Doc, per_data_version
+from app.core.db import Doc, per_data_version, transactional
 from app.core.errors import bad_request
 from app.core.utils import fr_day, round2, round3
+from app.services import pricing
 from app.services.client_events import create_client_event
 from app.services.clients import is_sale
 from app.services.purchasing import purchase_price
@@ -369,7 +378,8 @@ def _rescue_clients(product: Doc, units: float, pct: int, t: dt.date) -> list[Do
         if not recent or not client or client["status"] != "active":
             continue
         ranked.append((len(recent), sum(q for _, q in recent), client, statistics.median(q for _, q in recent)))
-    ranked.sort(key=lambda r: (-r[0], -r[1]))
+    deal = deal_seekers()
+    ranked.sort(key=lambda r: (r[2]["id"] not in deal, -r[0], -r[1]))  # asked for a deal in writing (AI signal) first
     out, covered = [], 0.0
     for count, _, client, typical in ranked[:6]:
         own = crud.client_prices.get(f"{client['id']}|{product['id']}")
@@ -377,7 +387,8 @@ def _rescue_clients(product: Doc, units: float, pct: int, t: dt.date) -> list[Do
         offer = max(product["cost"], round2(unit_price * (1 - pct / 100)))
         qty = max(1, round(typical))
         out.append({"clientId": client["id"], "clientName": client["name"], "ordersLast90d": count, "suggestedQty": qty,
-                    "unitPrice": unit_price, "offerPrice": offer, "alreadyProposed": _already_proposed(client["id"], product["id"])})  # fmt: skip
+                    "unitPrice": unit_price, "offerPrice": offer, "alreadyProposed": _already_proposed(client["id"], product["id"]),
+                    "askedForDeal": deal.get(client["id"])})  # fmt: skip
         covered += qty
         if covered >= units:
             break
@@ -404,3 +415,241 @@ def propose_offer(ctx: Ctx, input: Doc) -> Doc:
             "amount": round2(qty * input["offerPrice"]),
         },
     )
+
+
+# ───────── AI signals (read by an LLM in the client notes, stored here; the numbers stay arithmetic) ─────────
+
+INTENTS = ("firm", "tentative", "cancelled", "unclear")
+# Measured on the 2024 and 2025 seasons (holiday-reservations/backtest): the reserved lines were bought at ~1.0x their estimate
+# (actual / estimated value 1.10 and 0.97), so neither a hesitation nor the notes-to-orders rate discounts the expected value
+# (doing so made it 17 % to 53 % too low). Only an explicit cancellation does.
+INTENT_WEIGHT = {"firm": 1.0, "unclear": 1.0, "tentative": 1.0, "cancelled": 0.0}
+
+
+def save_signals(input: Doc) -> Doc:
+    """Store what the LLM read in client notes (one signal per note). Checked: the note exists, the multiplier is 0–5,
+    product ids are ones the note is about. Replaces an earlier signal of the same note."""
+    saved = []
+    for sig in input.get("signals") or []:
+        ev = crud.client_events.get(sig.get("eventId", ""))
+        if not ev:
+            raise bad_request("unknown_event", f"Note client introuvable : {sig.get('eventId')}")
+        if sig.get("intent") not in INTENTS:
+            raise bad_request("invalid_intent", f"Intention inconnue : {sig.get('intent')} ({', '.join(INTENTS)})")
+        mult = float(sig.get("multiplier") if sig.get("multiplier") is not None else 1)
+        if not 0 <= mult <= 5:
+            raise bad_request("invalid_multiplier", "Le multiplicateur doit être entre 0 et 5")
+        dropped = [pid for pid in sig.get("droppedProductIds") or [] if pid in (ev.get("productIds") or [])]
+        doc = {
+            "eventId": ev["id"], "clientId": ev["clientId"], "intent": sig["intent"], "multiplier": round(mult, 2),
+            "droppedProductIds": dropped, "askedForDeal": bool(sig.get("askedForDeal")), "condition": (sig.get("condition") or "")[:200] or None,
+            "summary": (sig.get("summary") or "")[:300], "model": (input.get("model") or "")[:80], "at": dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),
+        }  # fmt: skip
+        crud.prediction_signals.put(doc)
+        saved.append(doc)
+    return {"saved": len(saved), "signals": saved}
+
+
+def list_signals() -> list[Doc]:
+    return crud.prediction_signals.all()
+
+
+def deal_seekers() -> dict[str, str]:
+    """client id → why (the note's summary), for clients whose notes asked for a deal / found us too expensive."""
+    return {s["clientId"]: s.get("summary") or "a demandé un geste" for s in crud.prediction_signals.all() if s.get("askedForDeal")}
+
+
+# ───────── Carnet de Noël: written holiday reservations ─────────
+
+HOLIDAY_FROM = "12-15"  # a « late-December purchase » is delivered from 15 to 31 December
+CONVERTED_FROM = "12-20"  # a reservation became an order when an order for the client is delivered 20–31 December
+
+
+def _season_notes(year: int) -> list[Doc]:
+    prefix = f"Fêtes {year}"
+    return sorted((e for e in crud.client_events.all() if e["title"].startswith(prefix) and "réservation" in e["title"]), key=lambda e: e["at"])
+
+
+@per_data_version
+def _late_december() -> dict[tuple[str, str], dict[int, float]]:
+    """(client, product) → {year: units delivered 15–31 December} over every sale order."""
+    out: dict[tuple[str, str], dict[int, float]] = defaultdict(lambda: defaultdict(float))
+    for o in crud.orders.all():
+        d = o["deliveryDate"][:10]
+        if not is_sale(o) or d[5:] < HOLIDAY_FROM:
+            continue
+        for line in o["lines"]:
+            out[(o["clientId"], line["productId"])][int(d[:4])] += line_qty(line)
+    return out
+
+
+def _orders_after(client_id: str, year: int) -> list[Doc]:
+    lo, hi = f"{year}-{CONVERTED_FROM}", f"{year}-12-31"
+    return [o for o in crud.orders.all() if o["clientId"] == client_id and o["status"] != "cancelled" and lo <= o["deliveryDate"][:10] <= hi]
+
+
+def _conversion(year: int) -> Doc:
+    """Share of the reservation notes of the 2 previous seasons whose client then had an order delivered 20–31 December."""
+    total = converted = 0
+    for y in (year - 2, year - 1):
+        for e in _season_notes(y):
+            total += 1
+            converted += bool(_orders_after(e["clientId"], y))
+    return {"rate": round(converted / total, 2) if total else None, "converted": converted, "total": total, "seasons": [year - 2, year - 1]}
+
+
+def _quote(text: str) -> str | None:
+    m = re.search(r"«\s*(.+?)\s*»", text or "")
+    return m[1] if m else None
+
+
+def holiday_reservations(client_id: str | None = None, season: int | None = None, use_signals: bool = True) -> Doc:
+    """`season` (default: this year) lets the same estimate run on a past season, seeing only the years before it (backtest)."""
+    t_iso = today()
+    year = season or int(t_iso[:4])
+    late = _late_december()
+    signals = {s["eventId"]: s for s in crud.prediction_signals.all()} if use_signals else {}
+    conv = _conversion(year)
+    levels = stock_levels()
+    lines, notes = [], []
+    for e in _season_notes(year):
+        if client_id and e["clientId"] != client_id:
+            continue
+        client = crud.clients.get(e["clientId"])
+        if not client:
+            continue
+        sig = signals.get(e["id"])
+        intent = sig["intent"] if sig else "unclear"
+        mult = sig["multiplier"] if sig else 1.0
+        ordered = _orders_after(client["id"], year) if year == int(t_iso[:4]) else []  # past season: what happened is the backtest's answer
+        notes.append({"eventId": e["id"], "clientId": client["id"], "clientName": client["name"], "at": e["at"][:10],
+                      "text": e.get("description", ""), "quote": _quote(e.get("description", "")), "intent": intent, "multiplier": mult,
+                      "askedForDeal": bool(sig and sig.get("askedForDeal")), "condition": sig.get("condition") if sig else None,
+                      "aiSummary": sig.get("summary") if sig else None, "analyzed": bool(sig)})  # fmt: skip
+        for pid in e.get("productIds") or []:
+            product = crud.products.get(pid)
+            if not product:
+                continue
+            past = {y: q for y, q in late.get((client["id"], pid), {}).items() if year - 3 <= y < year and q > 0}
+            baseline = round(sum(past.values()) / len(past)) if past else None
+            dropped = bool(sig and pid in sig.get("droppedProductIds", []))
+            qty = None if baseline is None else (0 if dropped or intent == "cancelled" else math.ceil(baseline * mult))
+            unit_price = pricing.price_for(client["id"], pid, qty or 1)
+            value = round2(qty * unit_price) if qty else (0.0 if qty == 0 else None)
+            already = any(any(l["productId"] == pid for l in o["lines"]) for o in ordered)
+            weight = 0.0 if dropped else INTENT_WEIGHT[intent]
+            lines.append({
+                "eventId": e["id"], "clientId": client["id"], "clientName": client["name"], "productId": pid, "productName": product["name"],
+                "unit": product["unit"], "pastYears": [{"year": y, "qty": round3(q)} for y, q in sorted(past.items())], "baselineQty": baseline,
+                "multiplier": mult, "qty": qty, "unitPrice": unit_price, "value": value, "intent": "cancelled" if dropped else intent,
+                "expectedValue": round2(value * weight) if value else 0.0, "ordered": already,
+            })  # fmt: skip
+    # stock check: the reserved units (best estimate) against what we have and what is coming, per product
+    by_product: dict[str, float] = defaultdict(float)
+    for ln in lines:
+        if ln["qty"] and not ln["ordered"]:
+            by_product[ln["productId"]] += ln["qty"]
+    products = []
+    for pid, units in by_product.items():
+        product = crud.products.require(pid)
+        level = levels.get(pid, {"available": 0, "incoming": 0})
+        supplier = crud.suppliers.get(product.get("mainSupplierId") or "")
+        lead = supplier.get("leadTimeDays") if supplier else None
+        order_by = (dt.date(year, 12, 23) - dt.timedelta(days=lead or 0)).isoformat()
+        short = max(0.0, units - max(0, level["available"]) - level["incoming"])
+        products.append({"productId": pid, "productName": product["name"], "unit": product["unit"], "reservedUnits": round3(units),
+                         "available": level["available"], "incoming": level["incoming"], "shortfall": round3(short),
+                         "supplierName": supplier["name"] if supplier else None, "orderBy": order_by if short else None,
+                         "late": bool(short) and order_by < t_iso})  # fmt: skip
+    products.sort(key=lambda p: (-p["shortfall"], p["productName"]))
+    known = [ln for ln in lines if ln["value"] is not None]
+    return {
+        "asOf": t_iso, "season": year, "notes": notes, "lines": lines, "products": products, "conversion": conv,
+        "totals": {
+            "notes": len(notes), "lines": len(lines), "linesWithoutHistory": sum(1 for ln in lines if ln["baselineQty"] is None),
+            "reservedValue": round2(sum(ln["value"] for ln in known if ln["intent"] != "cancelled")),
+            "expectedValue": round2(sum(ln["expectedValue"] for ln in lines)),
+            "orderedLines": sum(1 for ln in lines if ln["ordered"]), "analyzedNotes": sum(1 for n in notes if n["analyzed"]),
+            "shortProducts": sum(1 for p in products if p["shortfall"] > 0),
+        },
+    }  # fmt: skip
+
+
+def reservation_notes(season: int | None = None) -> list[Doc]:
+    year = season or int(today()[:4])
+    out = []
+    for e in _season_notes(year):
+        client = crud.clients.get(e["clientId"])
+        pids = [pid for pid in e.get("productIds") or [] if crud.products.get(pid)]
+        out.append({"eventId": e["id"], "clientId": e["clientId"], "clientName": client["name"] if client else e["clientId"], "at": e["at"][:10],
+                    "text": e.get("description", ""), "productIds": pids, "productNames": [crud.products.require(p)["name"] for p in pids]})  # fmt: skip
+    return out
+
+
+def reservations_backtest(season: int, use_signals: bool = True) -> Doc:
+    """The Carnet de Noël estimate of a PAST season (history before it only), judged on what those clients really bought
+    15–31 December of that season. `use_signals` = with the LLM's reading of the notes (×2, cancelled…), else plain arithmetic."""
+    if season >= int(today()[:4]):
+        raise bad_request("season_not_over", "Seule une saison terminée peut être évaluée")
+    data = holiday_reservations(season=season, use_signals=use_signals)
+    late = _late_december()
+    rows = []
+    for ln in data["lines"]:
+        if ln["qty"] is None:
+            continue  # no history: no estimate to judge
+        actual = late.get((ln["clientId"], ln["productId"]), {}).get(season, 0.0)
+        rows.append({"clientName": ln["clientName"], "productName": ln["productName"], "predicted": ln["qty"], "actual": round3(actual),
+                     "unitPrice": ln["unitPrice"], "intent": ln["intent"], "multiplier": ln["multiplier"]})  # fmt: skip
+    actual_units = sum(r["actual"] for r in rows)
+    abs_err = sum(abs(r["predicted"] - r["actual"]) for r in rows)
+    actual_value = sum(r["actual"] * r["unitPrice"] for r in rows)
+    predicted_value = sum(r["predicted"] * r["unitPrice"] for r in rows)
+    expected_value = sum(r["predicted"] * r["unitPrice"] * INTENT_WEIGHT.get(r["intent"], 1.0) for r in rows)
+    return {
+        "season": season, "useSignals": use_signals, "lines": len(rows), "notesToOrders": data["conversion"]["rate"],
+        "linesBought": sum(1 for r in rows if r["actual"] > 0),
+        "wape": round(abs_err / actual_units, 3) if actual_units else None,  # weighted absolute % error on units
+        "within30Pct": round(sum(1 for r in rows if r["actual"] and abs(r["predicted"] - r["actual"]) <= 0.3 * r["actual"]) / len(rows), 3) if rows else None,
+        "predictedValue": round2(predicted_value), "expectedValue": round2(expected_value), "actualValue": round2(actual_value),
+        "valueError": round((expected_value - actual_value) / actual_value, 3) if actual_value else None,
+        "items": rows,
+    }  # fmt: skip
+
+
+# ───────── A rescue offer accepted on a call (agent tool add_rescue_offer) ─────────
+
+
+@transactional
+def accept_rescue_offer(ctx: Ctx, input: Doc) -> Doc:
+    """Add a rescue lot to the client's DRAFT order at the rescue price. The price is computed HERE from the current stock to
+    rescue (never sent by the caller), refused below cost, and only for a client listed as a buyer of that lot. The line goes
+    through the order's usual recap + explicit yes before any confirmation. Writes the offer in the client's history."""
+    from app.services import orders  # (circular at import time)
+
+    client_id, product_id, order_id = input["clientId"], input["productId"], input["orderId"]
+    item = next((i for i in stock_rescue()["items"] if i["productId"] == product_id), None)
+    if not item:
+        raise bad_request("no_rescue", "Ce produit n'est pas (ou plus) dans le stock à écouler")
+    offer = next((c for c in item["clients"] if c["clientId"] == client_id), None)
+    if not offer:
+        raise bad_request("not_a_buyer", "Cette offre n'est pas prévue pour ce client (il n'achète pas ce produit)")
+    product = crud.products.require(product_id)
+    if offer["offerPrice"] < product["cost"]:
+        raise bad_request("below_cost", "Prix d'offre sous le coût : refusé")
+    order = crud.orders.require(order_id)
+    if order["clientId"] != client_id or order["status"] != "draft":
+        raise bad_request("order_not_editable", "L'offre ne s'ajoute qu'à une commande en brouillon de ce client")
+    if any(line["productId"] == product_id for line in order["lines"]):
+        raise bad_request("already_in_order", "Ce produit est déjà dans la commande")
+    qty = float(input.get("qty") or offer["suggestedQty"])
+    if qty <= 0 or qty > item["atRiskUnits"] + 1e-9:
+        raise bad_request("invalid_qty", f"Quantité entre 0 et {item['atRiskUnits']:g} (le lot à écouler)")
+    detail = orders.add_line(ctx, order_id, {"productId": product_id, "qty": qty, "unitPrice": offer["offerPrice"],
+                                             "note": f"Offre de déstockage -{item['suggestedDiscountPct']} %"})  # fmt: skip
+    create_client_event(ctx, client_id, {
+        "type": "price_negotiation", "title": f"Offre de déstockage : {product['name']}",
+        "description": f"Acceptée au téléphone : {qty:g} × {offer['offerPrice']:.2f} € HT au lieu de {offer['unitPrice']:.2f} € "
+                       f"(-{item['suggestedDiscountPct']} %), ajoutée au brouillon {order['number']} à confirmer.",
+        "productIds": [product_id], "amount": round2(qty * offer["offerPrice"]), "orderId": order_id,
+    })  # fmt: skip
+    return detail

@@ -2,7 +2,19 @@
 
 from fastapi import APIRouter, Query
 
-from app.schemas.proactive import AutodialInput, AutodialState, DispatchResult, ProactiveBrief, ProactiveCall, ProactiveOpportunity
+from app.dependencies import CtxDep
+
+from app.schemas.proactive import (
+    AutodialInput,
+    AutodialState,
+    CallStatusInput,
+    DispatchResult,
+    OutcomeInput,
+    OutcomeResult,
+    ProactiveBrief,
+    ProactiveCall,
+    ProactiveOpportunity,
+)
 from app.services import proactive
 
 router = APIRouter(prefix="/api/proactive", tags=["proactive"])
@@ -46,7 +58,7 @@ async def dispatch(force: bool = Query(True, description="Skip the pause between
 
 
 @router.get("/calls", response_model=list[ProactiveCall])
-async def list_calls(status: str | None = Query(None, description="ringing | answered | declined | missed")):
+async def list_calls(status: str | None = Query(None, description="ringing | answered | declined | missed | cancelled")):
     """The journal of the calls the agent placed, newest first."""
     return proactive.calls(status or None)
 
@@ -60,6 +72,24 @@ async def answer_call(call_id: str):
 @router.post("/calls/{call_id}/decline", response_model=ProactiveCall)
 async def decline_call(call_id: str):
     return proactive.answer_call(call_id, "declined")
+
+
+@router.get("/calls/{call_id}", response_model=ProactiveCall)
+async def get_call(call_id: str):
+    return proactive.get_call(call_id)
+
+
+@router.post("/calls/{call_id}/status", response_model=ProactiveCall)
+async def set_call_status(call_id: str, body: CallStatusInput):
+    """The phone bridge reports what the phone network said: no answer (missed), busy / declined, failed, or hung up (completed)."""
+    return proactive.set_call_status(call_id, body.status, body.note)
+
+
+@router.post("/opportunities/{opportunity_id}/outcome", response_model=OutcomeResult)
+async def record_outcome(opportunity_id: str, body: OutcomeInput, ctx: CtxDep):
+    """The agent records what was decided on the call (tool record_call_outcome): stored on the call and written as one
+    « Appel proactif : … » line in the client's history. Works even when the order no longer has a problem (it was just fixed)."""
+    return proactive.record_outcome(ctx, opportunity_id, body.decision, body.summary, body.call_id)
 
 
 @router.delete("/calls", status_code=204)

@@ -17,16 +17,20 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import json
 import logging
 import os
 import time
+import urllib.error
+import urllib.request
 import uuid
 
 from app import crud
-from app.core.activity import today
+from app.core.activity import Ctx, today
 from app.core.db import Doc
-from app.core.errors import conflict, not_found
+from app.core.errors import bad_request, conflict, not_found
 from app.core.utils import fr_day, to_date
+from app.services.client_events import create_client_event
 from app.services.orders import order_warnings
 from app.services.stock import stock_levels
 
@@ -152,13 +156,14 @@ def _order_issues(t: dt.date) -> list[Doc]:
         if "delivery" in kinds:
             steps.append("Lui dire qu'aucune tournée ne dessert sa zone ce jour-là et lui proposer les dates possibles ; s'il en choisit une, change la date avec update_order.")
         steps.append(
-            "Comme la commande est déjà préparée, tu ne peux pas la changer toi-même : enregistre SA DÉCISION avec log_client_event pour que l'équipe l'applique, et ne dis jamais que c'est déjà fait."
+            "Comme la commande est déjà préparée, tu ne peux pas la changer toi-même : enregistre SA DÉCISION avec record_call_outcome (elle va dans son dossier), et ne dis jamais que c'est déjà fait."
             if o["status"] == "prepared" else "Applique ce qu'il décide avec tes outils (order_id ci-dessus), puis récapitule ce qui est modifié."
         )
         out.append({
             "id": f"order_issue~{client['id']}~{o['id']}", "type": "order_issue", "priority": _priority(days), "clientId": client["id"],
             "clientName": client["name"], "contactName": _contact(client), "title": title, "reason": reason, "facts": facts,
             "objective": " ".join(steps), "kinds": kinds, "deadline": _deadline(days, delivery, o["status"]), "productIds": product_ids, "orderId": o["id"],
+            "orderValue": round(o.get("totalHt") or 0, 2),
         })  # fmt: skip
     return out
 
@@ -168,7 +173,7 @@ def _order_issues(t: dt.date) -> list[Doc]:
 
 def opportunities() -> list[Doc]:
     items = _order_issues(dt.date.fromisoformat(today()))
-    items.sort(key=lambda o: (-o["priority"], o["clientName"]))
+    items.sort(key=lambda o: (-o["priority"], -o.get("orderValue", 0), o["clientName"]))  # same urgency: the bigger order first
     return items
 
 
@@ -195,10 +200,33 @@ def _brief(opp: Doc, client: Doc) -> str:
         "3. Propose UNE solution à la fois, écoute, adapte-toi à ce qu'il dit.",
         "4. Toute modification passe par tes outils habituels. Après une modification, récapitule ce qui change. Tu ne confirmes une commande en brouillon que s'il dit « oui » clairement.",
         "5. Pour remplacer un produit, utilise find_alternatives et respecte ses préférences : seulement avec son accord explicite. Ajoute D'ABORD la nouvelle ligne (add_order_line avec substitute_for), PUIS retire l'ancienne (l'ERP refuse de retirer la dernière ligne d'une commande). Ne raconte jamais une erreur technique au client : corrige-la en silence.",
-        f"6. En fin d'appel : enregistre D'ABORD le résultat avec log_client_event (client_id {client['id']}, type call, titre « Appel proactif : <ce qui a été décidé, en une phrase> », description courte), SANS rien dire avant, puis dis UNE seule phrase de conclusion. Dis « j'ai noté votre décision dans votre dossier » : jamais « j'ai transmis à l'équipe » ni « l'équipe va l'appliquer » (personne n'est prévenu automatiquement).",
+        "6. En fin d'appel, que le client ait accepté, refusé ou n'ait pas eu le temps : enregistre D'ABORD le résultat avec record_call_outcome (decision = ce qui a été décidé, en une phrase courte, ex. « livraison décalée au jeudi 24, jus ramené à 67 » ou « client pas disponible, rien changé »), SANS rien dire avant, puis dis UNE seule phrase de conclusion. Dis « j'ai noté votre décision dans votre dossier » : jamais « j'ai transmis à l'équipe » ni « l'équipe va l'appliquer » (personne n'est prévenu automatiquement).",
         "INTERDIT : promettre une heure de livraison, un e-mail ou un rappel que tu ne peux pas assurer ; inventer un prix, un stock, une date ; proposer une remise ; changer un produit sans son accord ; parler d'autre chose que de ce problème (ne cite pas les alertes de l'ERP qui n'en font pas partie : date limite d'un lot, crédit, etc.).",
     ]
+    offer = _rescue_offer(client["id"])
+    if offer:
+        item, c = offer
+        lines[-1] = lines[-1].replace("proposer une remise", "proposer une autre remise que l'offre ci-dessous")
+        lines += [
+            "",
+            f"OFFRE POSSIBLE (UNE seule, APRÈS avoir réglé le problème, seulement si le client semble ouvert ; s'il dit non ou est pressé, tu n'insistes pas) : "
+            f"{item['productName']}, un lot à écouler, à {c['offerPrice']:.2f} € HT au lieu de {c['unitPrice']:.2f} € (-{item['suggestedDiscountPct']} %), "
+            f"environ {c['suggestedQty']:g} {item['unit']}. S'il accepte : add_rescue_offer (product_id {item['productId']}), puis récapitule et attends son « oui ».",
+        ]
     return "\n".join(lines)
+
+
+def _rescue_offer(client_id: str) -> tuple[Doc, Doc] | None:
+    """PROACTIVE_RESCUE_OFFERS=1: one stock-to-rescue lot this client already buys (price computed by the ERP), not yet proposed."""
+    if os.environ.get("PROACTIVE_RESCUE_OFFERS", "0") != "1":
+        return None
+    from app.services.predictions import stock_rescue
+
+    for item in stock_rescue()["items"]:
+        for c in item["clients"]:
+            if c["clientId"] == client_id and not c["alreadyProposed"] and item["suggestedDiscountPct"] > 0:
+                return item, c
+    return None
 
 
 def opportunity_brief(opp_id: str) -> Doc:
@@ -213,7 +241,12 @@ def opportunity_brief(opp_id: str) -> Doc:
 # A background loop looks for the most urgent order issue and makes the call "ring" on the client's side; the agent speaks first
 # when someone picks up. The decision is made by auditable rules, not by the model: one call at a time, a pause between calls,
 # never below a minimum urgency, never the same client twice in a day (an "Appel proactif" line in its history), and an
-# opportunity that was already tried is not retried for 30 minutes. Calls live in memory (a live journal, not records).
+# opportunity that was already tried is not retried for 30 minutes.
+#
+# The journal of calls is stored in SQLite (table proactive_calls), so a backend restart does not wipe it mid-demo; `make reset`
+# empties it. Where the call rings depends on PHONE_MODE:
+#   simulator (default)  a window in the web app plays the client's phone (IncomingCall.tsx)
+#   twilio               the AI service dials the ONE demo number (DEMO_PHONE_TO) through Twilio and reports back here
 
 log = logging.getLogger("api")
 
@@ -233,7 +266,17 @@ CONFIG: dict = {
     "retry_minutes": 30,
     "min_priority": _env("PROACTIVE_MIN_PRIORITY", 50),
 }
-CALLS: list[Doc] = []  # newest first; keys starting with "_" are internal and never leave the API
+AI_SERVICE_URL = (os.environ.get("AI_SERVICE_URL") or f"http://localhost:{os.environ.get('AI_PORT') or 4100}").rstrip("/")
+OUTCOME_PREFIX = "Appel proactif"
+
+
+def phone_mode() -> str:
+    return "twilio" if os.environ.get("PHONE_MODE", "simulator").strip().lower() == "twilio" else "simulator"
+
+
+def _journal() -> list[Doc]:
+    """The calls, newest first (keys starting with "_" are internal and never leave the API)."""
+    return sorted(crud.proactive_calls.all(), key=lambda c: c["_t"], reverse=True)
 
 
 def plan_dispatch(calls: list[Doc], opps: list[Doc], called_today: set[str], now: float, cfg: dict, force: bool = False) -> tuple[list[tuple[str, str]], Doc | None]:
@@ -255,7 +298,7 @@ def plan_dispatch(calls: list[Doc], opps: list[Doc], called_today: set[str], now
         return changes, {
             "id": uuid.uuid4().hex[:12], "opportunityId": o["id"], "clientId": o["clientId"], "clientName": o["clientName"],
             "contactName": o.get("contactName"), "type": o["type"], "title": o["title"], "reason": o["reason"], "deadline": o.get("deadline", ""),
-            "priority": o["priority"], "status": "ringing", "createdAt": dt.datetime.now(dt.UTC).isoformat(timespec="seconds"), "_t": now,
+            "priority": o["priority"], "orderId": o.get("orderId"), "status": "ringing", "createdAt": dt.datetime.now(dt.UTC).isoformat(timespec="seconds"), "_t": now,
         }  # fmt: skip
     return changes, None
 
@@ -264,7 +307,7 @@ def _called_today() -> set[str]:
     t = today()
     return {
         e["clientId"] for e in crud.client_events.all()
-        if e["type"] == "call" and e["title"].startswith("Appel proactif") and to_date(e["at"]) == t
+        if e["type"] == "call" and e["title"].startswith(OUTCOME_PREFIX) and to_date(e["at"]) == t
     }  # fmt: skip
 
 
@@ -274,66 +317,197 @@ def _last_event_id() -> str:
 
 def dispatch_once(force: bool = False) -> Doc | None:
     now = time.time()
-    changes, new = plan_dispatch(CALLS, opportunities(), _called_today(), now, CONFIG, force)
+    changes, new = plan_dispatch(_journal(), opportunities(), _called_today(), now, CONFIG, force)
     for call_id, status in changes:
         _end(call_id, status, now)
     if new:
-        CALLS.insert(0, new)
-        del CALLS[100:]
-        log.info("proactive: the agent is calling %s (%s)", new["clientName"], new["title"])
-    return new
+        new["channel"] = "phone" if phone_mode() == "twilio" else "simulator"
+        crud.proactive_calls.put(new)
+        for old in _journal()[100:]:  # keep the journal short
+            crud.proactive_calls.delete(old["id"])
+        log.info("proactive: the agent is calling %s (%s) via %s", new["clientName"], new["title"], new["channel"])
+        if new["channel"] == "phone":
+            _to_ai_service("POST", "/phone/calls", {"callId": new["id"], "opportunityId": new["opportunityId"]}, on_error=new["id"])
+    return _public(new) if new else None
 
 
-def _end(call_id: str, status: str, now: float) -> None:
-    c = next(c for c in CALLS if c["id"] == call_id)
+def _end(call_id: str, status: str, now: float, note: str | None = None) -> None:
+    c = crud.proactive_calls.require(call_id)
     c["status"], c["_end"] = status, now
     c["endedAt"] = dt.datetime.now(dt.UTC).isoformat(timespec="seconds")
+    if note:
+        c["note"] = note
     if status == "answered":
-        c["_mark"] = _last_event_id()  # the call's outcome is the first "Appel proactif" line written in the client's history after this
+        c["_mark"] = _last_event_id()  # legacy outcome lookup: the first "Appel proactif" line written after this
+    crud.proactive_calls.put(c)
 
 
 def _outcome(c: Doc) -> str | None:
-    """What was decided: the title of the history line the agent wrote at the end of the call."""
+    """What was decided: stored by record_outcome (the agent's record_call_outcome tool); otherwise, for calls of the older
+    convention, the first "Appel proactif : …" line the agent wrote in the client's history after pickup."""
+    if c.get("outcome"):
+        return c["outcome"]
     if c["status"] != "answered":
         return None
     for e in sorted(crud.client_events.all(), key=lambda e: e["id"]):
-        if e["clientId"] == c["clientId"] and e["id"] > c.get("_mark", "") and e["type"] == "call" and e["title"].startswith("Appel proactif"):
-            return e["title"].removeprefix("Appel proactif").lstrip(" :")
+        if e["clientId"] == c["clientId"] and e["id"] > c.get("_mark", "") and e["type"] == "call" and e["title"].startswith(OUTCOME_PREFIX):
+            return e["title"].removeprefix(OUTCOME_PREFIX).lstrip(" :")
     return None
 
 
-def calls(status: str | None = None) -> list[Doc]:
+def _public(c: Doc) -> Doc:
+    return {**{k: v for k, v in c.items() if not k.startswith("_")}, "channel": c.get("channel", "simulator"), "outcome": _outcome(c)}
+
+
+def _expire_ringing() -> None:
     now = time.time()
-    for c in CALLS:  # a call nobody picks up is missed, even between two cycles of the loop
+    for c in _journal():  # a call nobody picks up is missed, even between two cycles of the loop
         if c["status"] == "ringing" and now - c["_t"] >= CONFIG["ring_seconds"]:
             _end(c["id"], "missed", now)
-    return [{**c, "outcome": _outcome(c)} for c in CALLS if not status or c["status"] == status]
+            if c.get("channel") == "phone":
+                _to_ai_service("POST", f"/phone/calls/{c['id']}/hangup", {})
+
+
+def calls(status: str | None = None) -> list[Doc]:
+    _expire_ringing()
+    return [_public(c) for c in _journal() if not status or c["status"] == status]
+
+
+def get_call(call_id: str) -> Doc:
+    _expire_ringing()
+    return _public(crud.proactive_calls.require(call_id))
 
 
 def answer_call(call_id: str, status: str = "answered") -> Doc:
-    call = next((c for c in calls() if c["id"] == call_id), None)
+    _expire_ringing()
+    call = crud.proactive_calls.get(call_id)
     if not call:
         raise not_found("Appel", call_id)
     if call["status"] != "ringing":
         raise conflict("not_ringing", "Cet appel ne sonne plus")
     _end(call_id, status, time.time())
-    return next(c for c in calls() if c["id"] == call_id)
+    return get_call(call_id)
+
+
+def set_call_status(call_id: str, status: str, note: str | None = None) -> Doc:
+    """Reported by the phone bridge (Twilio): the phone did not pick up (missed), was busy or declined (declined), the dial
+    failed (missed + note), or an answered call hung up (completed: only stamps hungUpAt). A call that already ended is left as is."""
+    call = crud.proactive_calls.get(call_id)
+    if not call:
+        raise not_found("Appel", call_id)
+    if status == "completed":
+        if call["status"] == "answered" and not call.get("hungUpAt"):
+            call["hungUpAt"] = dt.datetime.now(dt.UTC).isoformat(timespec="seconds")
+            crud.proactive_calls.put(call)
+    elif call["status"] == "ringing":
+        _end(call_id, status, time.time(), note)
+    return get_call(call_id)
+
+
+def record_outcome(ctx: Ctx, opportunity_id: str, decision: str, summary: str | None = None, call_id: str | None = None) -> Doc:
+    """The agent records what was decided on a proactive call (tool record_call_outcome): stored on the call (the journal shows
+    it) and written as ONE "Appel proactif : <decision>" line in the client's history (which also stops a second call today).
+    Calling it again on the same call updates that line instead of adding another."""
+    decision = " ".join((decision or "").split()).rstrip(".")
+    if not decision:
+        raise bad_request("empty_decision", "La décision est vide")
+    call = crud.proactive_calls.get(call_id) if call_id else None
+    if not call:  # the most recent call of this opportunity (the browser simulator only knows the opportunity)
+        call = next((c for c in _journal() if c["opportunityId"] == opportunity_id), None)
+    parts = opportunity_id.split("~")
+    client_id = call["clientId"] if call else (parts[1] if len(parts) >= 3 else "")
+    order_id = (call or {}).get("orderId") or (parts[2] if len(parts) >= 3 and parts[2].startswith("ord") else None)
+    if not client_id:
+        raise not_found("Occasion d'appel", opportunity_id)
+    client = crud.clients.require(client_id)
+    title = f"{OUTCOME_PREFIX} : {decision}"
+    existing = crud.client_events.get(call.get("outcomeEventId", "")) if call else None
+    if existing:
+        existing.update({"title": title, "description": summary or existing.get("description", "")})
+        crud.client_events.put(existing)
+        event = existing
+    else:
+        body: Doc = {"type": "call", "title": title, "description": summary or ""}
+        if order_id and crud.orders.get(order_id):
+            body["orderId"] = order_id
+        event = create_client_event(ctx, client["id"], body)
+    if call:
+        call["outcome"], call["outcomeEventId"] = decision, event["id"]
+        crud.proactive_calls.put(call)
+    return {"call": _public(call) if call else None, "eventId": event["id"], "clientId": client["id"], "decision": decision}
 
 
 def clear_calls() -> None:
-    CALLS.clear()
+    crud.proactive_calls.table.replace_all([])
 
 
 def autodial_state() -> Doc:
     return {
         "enabled": CONFIG["enabled"], "intervalSeconds": CONFIG["interval"], "ringSeconds": CONFIG["ring_seconds"],
         "cooldownSeconds": CONFIG["cooldown"], "minPriority": CONFIG["min_priority"], "ringing": len(calls("ringing")),
+        "phoneMode": phone_mode(),
     }  # fmt: skip
 
 
 def set_autodial(enabled: bool) -> Doc:
+    """Pause or resume. Pausing also hangs up a call that is still ringing (it shows as cancelled), so a pause takes effect at once."""
     CONFIG["enabled"] = enabled
+    if not enabled:
+        now = time.time()
+        for c in _journal():
+            if c["status"] == "ringing":
+                _end(c["id"], "cancelled", now, "Annulé : l'agent a été mis en pause")
+                if c.get("channel") == "phone":
+                    _to_ai_service("POST", f"/phone/calls/{c['id']}/hangup", {})
     return autodial_state()
+
+
+# ───────── Talking to the AI service (phone mode only) ─────────
+
+_pending: set[asyncio.Future] = set()  # keep a reference to the background requests until they finish
+
+
+def _post_json(method: str, path: str, body: Doc) -> Doc:
+    req = urllib.request.Request(AI_SERVICE_URL + path, method=method, data=json.dumps(body).encode(), headers={"content-type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            raw = r.read()
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", "replace")
+        try:
+            detail = (json.loads(detail).get("error") or {}).get("message") or detail
+        except (ValueError, AttributeError):
+            pass
+        raise RuntimeError(f"service IA HTTP {e.code} : {detail[:300]}") from None
+    except (urllib.error.URLError, OSError) as e:
+        raise RuntimeError(f"service IA injoignable ({AI_SERVICE_URL}) : {e}") from None
+
+
+def _to_ai_service(method: str, path: str, body: Doc, on_error: str | None = None) -> None:
+    """Fire and forget (the API answers at once). If the dial itself fails, the call is marked missed with the reason, so the
+    journal shows why the phone did not ring."""
+
+    def done(fut: asyncio.Future) -> None:
+        _pending.discard(fut)
+        if (err := fut.exception()) is not None:
+            log.warning("proactive: %s %s failed: %s", method, path, err)
+            if on_error and (c := crud.proactive_calls.get(on_error)) and c["status"] == "ringing":
+                _end(on_error, "missed", time.time(), f"Le téléphone n'a pas pu sonner : {err}")
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:  # no event loop (scripts): do it inline
+        try:
+            _post_json(method, path, body)
+        except RuntimeError as e:
+            log.warning("proactive: %s %s failed: %s", method, path, e)
+            if on_error and (c := crud.proactive_calls.get(on_error)) and c["status"] == "ringing":
+                _end(on_error, "missed", time.time(), f"Le téléphone n'a pas pu sonner : {e}")
+        return
+    fut = loop.run_in_executor(None, _post_json, method, path, body)
+    _pending.add(fut)
+    fut.add_done_callback(done)
 
 
 async def autodial_loop() -> None:
