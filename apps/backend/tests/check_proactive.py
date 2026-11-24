@@ -1,11 +1,13 @@
 """Checks of /api/proactive against the running ERP (like check_predictions.py: plain asserts, no framework).
-It writes ONE client-history line ("Appel proactif : test") and pauses/resumes the agent's autodial: run it on a throwaway ERP.
+It writes ONE client-history line ("Appel proactif : ...") and pauses/resumes the agent's autodial: run it on a throwaway ERP.
 
     API=http://localhost:4000 python apps/backend/tests/check_proactive.py
 
-Exit code 1 if a check fails.
+Principle under test: the agent phones a client ONLY to solve a problem on an order it already has (a product that cannot be
+delivered, a delivery day without a route). Never to sell, never to chase a usual order. Exit code 1 if a check fails.
 """
 
+import datetime as dt
 import json
 import os
 import re
@@ -38,50 +40,60 @@ def check(name: str, ok: bool, detail: str = ""):
         failures.append(name)
 
 
+_, meta = call("/meta")
+today = dt.date.fromisoformat(meta["today"])
 s, opps = call("/proactive/opportunities")
-check("opportunities answer", s == 200 and isinstance(opps, list) and len(opps) > 0, str(s))
+check("missions answer", s == 200 and isinstance(opps, list) and len(opps) > 0, str(s))
 check("most urgent first", [o["priority"] for o in opps] == sorted((o["priority"] for o in opps), reverse=True))
 check("ids are unique", len({o["id"] for o in opps}) == len(opps))
-check("every opportunity has a reason, facts and an objective", all(o["reason"] and o["facts"] and o["objective"] for o in opps))
+check("every mission has a problem, a reason, facts, what the agent does and a deadline", all(o["title"] and o["reason"] and o["facts"] and o["objective"] and o["deadline"] and o["kinds"] for o in opps))
 
-# Only clients we can sell to are phoned
+# ── The principle: only problems on orders in progress ──
+check("the only kind of call is a problem on an order (never a sale, never a reminder)", all(o["type"] == "order_issue" and set(o["kinds"]) <= {"stock", "delivery"} for o in opps))
+check("every mission is tied to one order", all(o.get("orderId") for o in opps))
+status_ok, in_horizon = True, True
+for o in opps:
+    s, order = call("/orders/" + o["orderId"])
+    status_ok &= s == 200 and order["status"] in ("draft", "confirmed", "prepared") and order["clientId"] == o["clientId"]
+    in_horizon &= 0 <= (dt.date.fromisoformat(order["deliveryDate"][:10]) - today).days <= 30
+check("each order is still open and belongs to the client called", status_ok)
+check("each delivery is today or within 30 days", in_horizon)
 s, clients = call("/clients?limit=500")
 status_of = {c["id"]: c["status"] for c in (clients if isinstance(clients, list) else clients["items"])}
 check("only active clients are called (never blocked or prospects)", all(status_of.get(o["clientId"]) == "active" for o in opps))
+check("no 'late usual order' or 'season' call exists any more", not any(re.search(r"en retard|habituel|saison|anticiper", o["title"] + " " + o["reason"], re.I) for o in opps))
 
-# The real case of the data: a supplier shortage on an order already in progress
-shortage = [o for o in opps if o["type"] == "shortage_order"]
-check("a supplier shortage on a client's open order is found", len(shortage) > 0)
-if shortage:
-    o = shortage[0]
-    check("the shortage order comes first (most urgent)", opps[0]["id"] == o["id"])
+# ── The real cases of the data ──
+stock = [o for o in opps if o["kinds"] == ["stock"] and "aujourd'hui" in o["deadline"]]
+check("a supplier shortage on today's order is found and comes first", len(stock) > 0 and opps[0]["id"] == stock[0]["id"])
+if stock:
+    o = stock[0]
     s, b = call("/proactive/opportunities/" + urllib.parse.quote(o["id"], safe=""))
-    check("the brief of one opportunity answers", s == 200 and "brief" in b, str(s))
+    check("the brief of one mission answers", s == 200 and "brief" in b, str(s))
     text = b["brief"]
-    check("the ORDERED quantity is quoted, not the picked one (no '0 ×')", not re.search(r"(^|[^\d.,])0 × ", text), text[:0])
-    check("the brief names the client id and the order id the agent needs", o["clientId"] in text and (o.get("orderId") or "?") in text)
-    check("the brief lists the only facts the agent may quote", "FAITS VÉRIFIÉS" in text)
-    check("the brief forbids invented promises, prices and unapproved substitutions", "INTERDIT" in text and "sans son accord" in text)
-    check("the brief requires a recap and an explicit yes before any order", "accord explicite" in text and "« oui » clair" in text)
+    check("the ORDERED quantity is quoted, not the picked one (no '0 ×')", not re.search(r"(^|[^\d.,])0 × ", text))
+    check("the brief names the client id, the order id and the product id the agent needs", o["clientId"] in text and o["orderId"] in text and "product_id : prd_" in text)
+    check("the brief lists the only facts the agent may quote", "FAITS VÉRIFIÉS" in text and "ÉCHÉANCE" in text)
+    check("the brief forbids invented promises, prices, unapproved substitutions and other topics", "INTERDIT" in text and "sans son accord" in text and "d'autre chose que de ce problème" in text)
+    check("the brief says what to do if the client has no time (the essential in one sentence)", "n'a pas le temps" in text)
     check("a commercial's note about substitutions reaches the agent", "substitution" in text.lower())
-    if "préparée" in " ".join(o["facts"]).lower():
-        check("a prepared order is flagged as no longer editable", "DÉJÀ PRÉPARÉE" in text and "log_client_event" in text)
+    check("a prepared order is flagged as no longer editable", "DÉJÀ PRÉPARÉE" in text and "log_client_event" in text)
+    check("no double full stop in the facts", not re.search(r"\.\.", text))
 
-# Seasonal businesses that are closed in winter must not be called as 'overdue'
-closed = {"La Cabane de l'Aiguillon", "Le Bistrot de la Dune", "La Guinguette du Port", "Le Kiosque de la Plage", "La Cabane à Huîtres", "Camping Les Platanes"}
-check("closed seasonal businesses are not called 'overdue'", not any(o["type"] == "overdue" and o["clientName"] in closed for o in opps))
+both = [o for o in opps if "delivery" in o["kinds"]]
+check("a delivery day without a route is found", len(both) > 0)
+for o in both:
+    s, b = call("/proactive/opportunities/" + urllib.parse.quote(o["id"], safe=""))
+    dates = re.findall(r"\((\d{4}-\d{2}-\d{2})\)", b["brief"])
+    check("proposed delivery dates exist", len(dates) > 0)
+    check("they fall on a day a route serves (Tue / Thu / Fri for the Bassin)", all(dt.date.fromisoformat(d).weekday() in (1, 3, 4) for d in dates), str(dates))
+    check("they are in the future and never a public holiday (no delivery on 25 December)", all(dt.date.fromisoformat(d) > today and d[5:] not in {"12-25", "01-01", "05-01", "07-14", "11-01", "11-11", "08-15"} for d in dates), str(dates))
+    check("the brief tells the agent how to change the date", "update_order" in b["brief"])
 
-# Seasonal reminders: the house rule only for champagnes, and the product ids exist
-for o in [x for x in opps if x["type"] == "seasonal"]:
-    s, p = call("/products/" + o["productIds"][0])
-    festive = any("10 décembre" in f for f in o["facts"])
-    check(f"festive rule only on sparkling wines ({p['name'][:30]})", festive == (p["category"] == "bulles"), f"{p['category']} {festive}")
 ids = {m for o in opps for f in o["facts"] for m in re.findall(r"product_id : (prd_\d+)", f)}
 check("every product id given to the agent exists", all(call("/products/" + i)[0] == 200 for i in ids))
-
 s, e = call("/proactive/opportunities/does-not-exist")
-check("an unknown opportunity is a 404", s == 404, str(s))
-
+check("an unknown mission is a 404", s == 404, str(s))
 
 # ───────── the agent places the calls by itself ─────────
 call("/proactive/autodial", "POST", {"enabled": False})  # the background loop must not interfere with the checks
@@ -89,7 +101,8 @@ call("/proactive/calls", "DELETE")
 s, st = call("/proactive/autodial")
 check("the agent's initiative can be paused", s == 200 and st["enabled"] is False)
 s, d1 = call("/proactive/dispatch", "POST")
-check("a cycle makes a call ring for the most urgent opportunity", s == 200 and d1["status"] == "ringing" and d1["call"]["opportunityId"] == opps[0]["id"], str(d1)[:120])
+check("a cycle makes a call ring for the most urgent mission", s == 200 and d1["status"] == "ringing" and d1["call"]["opportunityId"] == opps[0]["id"], str(d1)[:120])
+check("the ringing call carries the problem and the deadline", d1["call"]["title"] == opps[0]["title"] and d1["call"]["deadline"] == opps[0]["deadline"])
 s, d2 = call("/proactive/dispatch", "POST")
 check("it never rings two calls at once", d2["status"] == "nothing")
 s, ringing = call("/proactive/calls?status=ringing")
@@ -100,23 +113,24 @@ check("the client can decline", s == 200 and dec["status"] == "declined")
 s, _x = call(f"/proactive/calls/{first['id']}/answer", "POST")
 check("a call that no longer rings cannot be picked up (409)", s == 409, str(s))
 s, d3 = call("/proactive/dispatch", "POST")
-check("the next cycle calls someone else (a tried opportunity is not retried)", d3["status"] == "ringing" and d3["call"]["opportunityId"] != first["opportunityId"])
-second = d3["call"]
-s, ans = call(f"/proactive/calls/{second['id']}/answer", "POST")
-check("picking up marks the call answered and gives the opportunity to open", s == 200 and ans["status"] == "answered" and ans["opportunityId"] == second["opportunityId"])
+if len(opps) > 1:
+    check("the next cycle calls someone else (a tried mission is not retried)", d3["status"] == "ringing" and d3["call"]["opportunityId"] != first["opportunityId"])
+    second = d3["call"]
+else:
+    check("with a single mission, a declined one is not called again right away", d3["status"] == "nothing")
+    second = None
+if second:
+    s, ans = call(f"/proactive/calls/{second['id']}/answer", "POST")
+    check("picking up marks the call answered and gives the mission to open", s == 200 and ans["status"] == "answered" and ans["opportunityId"] == second["opportunityId"])
+    check("an answered call has no outcome until the agent writes one", ans.get("outcome") is None)
+    call(f"/clients/{second['clientId']}/events", "POST", {"type": "call", "title": "Appel proactif : le client attend le prochain arrivage", "description": "check_proactive"})
+    s, journal = call("/proactive/calls")
+    mine = next(c for c in journal if c["id"] == second["id"])
+    check("the journal shows what was decided (the line the agent wrote in the client's history)", mine["outcome"] == "le client attend le prochain arrivage", str(mine.get("outcome")))
+    s, d4 = call("/proactive/dispatch", "POST")
+    check("a client already called today is not called again", d4["status"] == "nothing" or d4["call"]["clientId"] != second["clientId"])
 s, _x = call("/proactive/calls/does-not-exist/answer", "POST")
 check("an unknown call is a 404", s == 404, str(s))
-
-# a client already phoned today (an "Appel proactif" line in its history) is not called again
-tried = {first["opportunityId"], second["opportunityId"]}
-skip = next((o for o in opps if o["id"] not in tried and o["priority"] >= st["minPriority"] and o["clientId"] not in {first["clientId"], second["clientId"]}), None)
-if skip:
-    call(f"/clients/{skip['clientId']}/events", "POST", {"type": "call", "title": "Appel proactif : test", "description": "check_proactive"})
-    s, d4 = call("/proactive/dispatch", "POST")
-    check("a client already called today is skipped", d4["status"] == "nothing" or d4["call"]["clientId"] != skip["clientId"], str(d4)[:120])
-else:
-    check("(skipped: no third client to test the daily limit)", True)
-
 s, st2 = call("/proactive/autodial")
 check("the rules are exposed", st2["intervalSeconds"] > 0 and st2["ringSeconds"] > 0 and st2["cooldownSeconds"] > 0 and st2["minPriority"] >= 0)
 call("/proactive/calls", "DELETE")

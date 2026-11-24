@@ -1,4 +1,4 @@
-"""Predictions: the season radar (coming demand peaks) and stock to rescue (lots that will not sell before they expire)."""
+"""Predictions: the season radar (coming demand peaks) and stock to rescue (lots that will not sell before their ERP end date)."""
 
 from app.schemas.base import Input, Schema
 
@@ -99,7 +99,7 @@ class RescueItem(Schema):
     unit: str
     at_risk_units: float  # units the sales rate will not clear before the lots expire
     at_risk_value: float  # at cost
-    earliest_expiry: str
+    earliest_expiry: str  # the soonest ERP end date (`expiresAt`) among the lots at risk: an ERP date, not a guarantee of spoilage
     days_to_expiry: int
     weekly_sales: float
     list_price: float

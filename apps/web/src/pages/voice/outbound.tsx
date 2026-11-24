@@ -37,7 +37,8 @@ export function OutboundBanner({ ready, started, onCall }: { ready: boolean; sta
             {o.contactName ? <span className="text-muted-foreground">{o.contactName}</span> : null}
             {started ? <Badge tone="violet">en cours</Badge> : null}
           </div>
-          <p className="text-[12px] text-muted-foreground">{o.reason}</p>
+          <p className="text-[12.5px]">{o.title}</p>
+          <p className="text-[12px] text-muted-foreground">{o.deadline}</p>
         </div>
       )}
       {o && !started && !launched ? (

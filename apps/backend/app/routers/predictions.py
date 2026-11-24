@@ -35,8 +35,8 @@ async def season_radar_backtest(
 
 @router.get("/stock-rescue", response_model=StockRescue)
 async def stock_rescue(horizon_days: int = Query(120, alias="horizonDays", ge=7, le=180)):
-    """Lots that the current sales rate will not clear before they expire (first-expired-first-out), the clients who buy
-    that product and a discount that never goes below cost. Soonest expiry first."""
+    """Lots that the expected sales will not clear before their ERP end date (first-expired-first-out), the clients who buy
+    that product and a discount that never goes below cost. Soonest ERP end date first."""
     return predictions.stock_rescue(horizon_days)
 
 

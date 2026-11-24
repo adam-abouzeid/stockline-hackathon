@@ -1,7 +1,7 @@
 /**
  * Prévisions — what a seller should act on this week, in three lists:
  *  1. coming demand peaks (season radar) with the date to order by,
- *  2. stock that will not sell before it expires, with offers to propose (drafts: nothing is sent),
+ *  2. stock that will not sell before its ERP end date ("date limite" of the lot), with offers to propose (drafts: nothing is sent),
  *  3. the existing low-stock rule (the stockout engine of the team plugs in here).
  * Everything is read from /api/predictions/* and the dashboard; the only write is "offer proposed" (a client-history line).
  */
@@ -120,9 +120,9 @@ function Fact({ label, children }: { label: string; children: React.ReactNode })
 function Rescue() {
   const q = useQuery({ queryKey: ["predictions", "rescue"], queryFn: () => api.predictions.stockRescue() });
   return (
-    <Section title="Stock à écouler avant la date limite" count={q.data?.items.length}>
+    <Section title="Stock à écouler avant la date limite ERP" count={q.data?.items.length}>
       <p className="mb-3 max-w-[760px] text-[12.5px] text-muted-foreground">
-        Lots que les ventes attendues (saison comprise) n'écouleront pas avant leur date limite. Pour chacun : les clients qui l'achètent déjà et une remise qui ne descend jamais sous le coût.
+        Lots dont la date limite enregistrée dans l'ERP approche et que les ventes attendues (saison comprise) n'écouleront pas à temps. Cette date est calculée à la réception (date d'arrivée + durée de vie du produit dans l'ERP) : ce n'est pas une garantie de péremption. Pour chacun : les clients qui l'achètent déjà et une remise qui ne descend jamais sous le coût.
         Ce sont des brouillons : le bouton note l'offre dans l'historique du client, rien n'est envoyé ni modifié.
       </p>
       {q.isLoading ? (
@@ -150,7 +150,7 @@ function RescueCard({ item: i }: { item: RescueItem }) {
     <div className="rounded-[6px] border border-border p-3">
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
         <Link to={`/products/${i.productId}`} className="text-[13px] font-medium hover:underline">{i.productName}</Link>
-        <Badge tone={i.daysToExpiry <= 7 ? "destructive" : "warning"}>date limite dans {i.daysToExpiry} j</Badge>
+        <Badge tone={i.daysToExpiry <= 7 ? "destructive" : "warning"}>date limite ERP dans {i.daysToExpiry} j</Badge>
         <span className="num text-[12px] text-muted-foreground">
           {num(i.atRiskUnits)} {i.unit} en danger ({fmtMoney(i.atRiskValue)} au coût) · {num(i.weeklySales)} ventes attendues par semaine
         </span>

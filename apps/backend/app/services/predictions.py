@@ -4,7 +4,7 @@ Predictions for the sellers: two interpretable, training-free views built on the
 * Season radar: which products usually sell at least double in an upcoming week (the same weeks come back every
   year), and by when to order given the supplier's lead time. A forecast is plain arithmetic on the weekly sales:
   the average of the same week across years, smoothed over 3 weeks, divided by a usual week.
-* Stock to rescue: lots that the current sales rate will not clear before they expire (first-expired-first-out),
+* Stock to rescue: lots that the expected sales will not clear before their ERP end date (`expiresAt`: reception date + the product's shelf life, first-expired-first-out),
   with the clients who buy that product and a discount that never goes below cost. Offers are drafts: a seller
   marks one as proposed, which only writes a line in the client's history.
 
@@ -341,7 +341,7 @@ def stock_rescue(horizon_days: int = 120) -> Doc:
         clients = _rescue_clients(product, units, pct, t)
         covered = sum(c["suggestedQty"] for c in clients)
         reason = (
-            f"{round(units)} {product['unit']} ne partiront pas avant leur date limite (le plus proche : {fr_day(earliest[0]['expiresAt'])}), "
+            f"{round(units)} {product['unit']} ne seront pas vendues avant la date limite ERP des lots (la plus proche : {fr_day(earliest[0]['expiresAt'])}), "
             f"car on n'en attend qu'environ {round(weekly, 1)} par semaine (saison comprise)."
         )
         reason += (
@@ -399,7 +399,7 @@ def propose_offer(ctx: Ctx, input: Doc) -> Doc:
         {
             "type": "price_negotiation",
             "title": f"Offre de déstockage : {product['name']}",
-            "description": f"Remise de {round(input['discountPct'])} % proposée : {qty:g} × {input['offerPrice']:.2f} € HT au lieu de {product['price']:.2f} €, pour écouler un lot proche de sa date limite. Proposée par un vendeur, à confirmer par le client.",
+            "description": f"Remise de {round(input['discountPct'])} % proposée : {qty:g} × {input['offerPrice']:.2f} € HT au lieu de {product['price']:.2f} €, pour écouler un lot dont la date limite ERP approche. Proposée par un vendeur, à confirmer par le client.",
             "productIds": [product["id"]],
             "amount": round2(qty * input["offerPrice"]),
         },

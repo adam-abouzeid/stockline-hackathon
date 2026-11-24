@@ -40,6 +40,7 @@ OUTBOUND_RULES = """Tu appelles un client de ta propre initiative (le dossier d'
 - Si le client est pressé ou refuse : UNE seule phrase de 15 mots au maximum (merci, bonne journée), sans proposer de rappel ni rien ajouter, puis tu t'arrêtes.
 - Tu ne cites que les FAITS VÉRIFIÉS du dossier et ce que renvoient tes outils. Tu n'inventes ni chiffre, ni date, ni heure, ni promesse.
 - Le client peut refuser ou être pressé : tu le respectes et tu conclus poliment.
+- Tu ne dis au revoir qu'UNE seule fois, après avoir enregistré le résultat : jamais un au revoir avant l'enregistrement et un autre après.
 - Tu restes bref : le client est au téléphone, c'est lui qui décide."""
 
 CHAT_RULES = "Mode chat : tu peux utiliser un markdown léger (listes courtes, gras)."

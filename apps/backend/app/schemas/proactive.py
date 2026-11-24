@@ -4,7 +4,8 @@ from typing import Literal
 
 from app.schemas.base import Input, Schema
 
-OpportunityType = Literal["shortage_order", "shortage_heads_up", "overdue", "seasonal"]
+OpportunityType = Literal["order_issue"]  # the only reason to phone: a client's open order cannot be delivered as planned
+IssueKind = Literal["stock", "delivery"]
 
 
 class ProactiveOpportunity(Schema):
@@ -17,7 +18,9 @@ class ProactiveOpportunity(Schema):
     title: str  # one line for the list
     reason: str  # why the agent calls, in a sentence
     facts: list[str]  # the verified facts the agent may quote
-    objective: str
+    objective: str  # what the agent does on the call
+    kinds: list[IssueKind]  # stock = a product is short, delivery = no route serves the zone that day
+    deadline: str  # e.g. "Livraison aujourd'hui : à prévenir avant le départ du camion"
     product_ids: list[str] = []
     order_id: str | None = None
 
@@ -39,10 +42,12 @@ class ProactiveCall(Schema):
     type: OpportunityType
     title: str
     reason: str
+    deadline: str
     priority: int
     status: Literal["ringing", "answered", "declined", "missed"]
     created_at: str
     ended_at: str | None = None
+    outcome: str | None = None  # what was decided on the call (the line the agent wrote in the client's history)
 
 
 class DispatchResult(Schema):

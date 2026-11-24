@@ -1,19 +1,25 @@
-/** Proactive calls (GET /api/proactive/*): occasions where the voice agent should phone a client first. Mirrors apps/backend/app/schemas/proactive.py. */
+/** Proactive calls (GET /api/proactive/*): the voice agent phones a client first only to solve a problem on an order it already has.
+ *  Mirrors apps/backend/app/schemas/proactive.py. */
 import type { Id } from "./domain";
 
-export type OpportunityType = "shortage_order" | "shortage_heads_up" | "overdue" | "seasonal";
+/** The only reason to phone: a client's open order cannot be delivered as planned. */
+export type OpportunityType = "order_issue";
+/** stock = a product is short (supplier shortage or not enough stock); delivery = no route serves the zone on that day. */
+export type IssueKind = "stock" | "delivery";
 
 export interface ProactiveOpportunity {
-  id: string; // "<type>~<clientId>~<key>"
+  id: string; // "order_issue~<clientId>~<orderId>"
   type: OpportunityType;
-  priority: number; // higher = call first
+  priority: number; // higher = call first (driven by how close the delivery is)
   clientId: Id;
   clientName: string;
   contactName?: string;
-  title: string;
+  title: string; // the problem, in one line
   reason: string;
   facts: string[]; // the verified facts the agent may quote
-  objective: string;
+  objective: string; // what the agent does on the call
+  kinds: IssueKind[];
+  deadline: string; // e.g. "Livraison aujourd'hui : à prévenir avant le départ du camion"
   productIds: Id[];
   orderId?: Id;
 }
@@ -30,10 +36,12 @@ export interface ProactiveCall {
   type: OpportunityType;
   title: string;
   reason: string;
+  deadline: string;
   priority: number;
   status: CallStatus;
   createdAt: string;
   endedAt?: string;
+  outcome?: string; // what was decided on the call (the line the agent wrote in the client's history)
 }
 
 export interface DispatchResult {

@@ -1,14 +1,16 @@
 """
-Proactive calls: find the clients the agent should phone FIRST, and write the brief it is given for the call.
+Proactive calls: the voice agent phones a client FIRST only when it has something that matters to tell it.
 
-Four kinds of occasion, all computed from the ERP data (no model, no training):
-* shortage_order     a supplier shortage is open on a product that a client already has on an open order
-* shortage_heads_up  the same shortage, for clients who buy that product regularly (before they order it)
-* overdue            a regular client late against its own ordering rhythm (not a seasonal business that is closed)
-* seasonal           a demand peak is coming (season radar) for a product the client bought in the same weeks last year
+A call must serve the client: solve a problem on an order it already has, or give it a serious update. It never phones to sell
+or to chase a usual order. The single trigger is therefore an open order (draft, confirmed or prepared) that cannot be delivered as
+planned, for one of two reasons:
 
-The agent never decides alone to act: it phones, proposes, and any order goes through the usual draft -> recap ->
-explicit "yes" flow. The brief lists the only facts it may quote and what it must not promise.
+* stock      a line's product is in shortage (a supplier shortage is open, or the available stock does not cover the line)
+* delivery   no route serves the client's zone on the delivery date (ERP warning `no_route`)
+
+One order = one call, even if it has both problems. Everything is computed from the ERP data (no model, no training).
+The agent never decides alone to act: it phones, explains, proposes, and applies what the client chooses with its usual tools
+(draft -> recap -> explicit "yes"). The brief lists the only facts it may quote and what it must not promise.
 """
 
 from __future__ import annotations
@@ -17,52 +19,36 @@ import asyncio
 import datetime as dt
 import logging
 import os
-import statistics
 import time
 import uuid
-from collections import defaultdict
 
 from app import crud
 from app.core.activity import today
-from app.core.db import Doc, per_data_version
+from app.core.db import Doc
 from app.core.errors import conflict, not_found
 from app.core.utils import fr_day, to_date
-from app.services.clients import is_sale
-from app.services.predictions import season_radar
+from app.services.orders import order_warnings
 from app.services.stock import stock_levels
 
 OPEN_STATUSES = ("draft", "confirmed", "prepared")
-MIN_ORDERS_YEAR = 8  # a "regular" client has at least this many delivery days in the last 12 months
-OVERDUE_FACTOR = 1.5  # late = longer than 1.5 x its typical gap (and at least 2 days more)
-MAX_OVERDUE_DAYS = 60  # beyond that it is churn, not a forgotten order
-SEASONAL_DAYS = 28  # a peak counts when its ramp week starts within this many days
-BUYER_DAYS = 90
-FESTIVE_RULE = "Règle de la maison : les réservations de fêtes (champagnes, coffrets) se prennent avant le 10 décembre."
+ISSUE_HORIZON_DAYS = 30  # an order is looked at when its delivery is within this many days
+WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+WEEKDAYS_FR = ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"]
+FIXED_HOLIDAYS = {"01-01", "05-01", "05-08", "07-14", "08-15", "11-01", "11-11", "12-25"}  # no delivery proposed on these days
 
 
-@per_data_version
-def _deliveries() -> dict[str, list[tuple[dt.date, Doc]]]:
-    """client -> [(delivery date, order)] of every sale order, oldest first. Shared: never mutate."""
-    out: dict[str, list[tuple[dt.date, Doc]]] = defaultdict(list)
-    for o in crud.orders.all():
-        if is_sale(o):
-            out[o["clientId"]].append((dt.date.fromisoformat(o["deliveryDate"][:10]), o))
-    for v in out.values():
-        v.sort(key=lambda x: x[0])
+def _open_orders(t: dt.date) -> list[Doc]:
+    return [o for o in crud.orders.all() if o["status"] in OPEN_STATUSES and dt.date.fromisoformat(o["deliveryDate"][:10]) >= t]
+
+
+def _open_shortages() -> dict[str, Doc]:
+    """product -> the open supplier shortage that concerns it (newest wins)."""
+    out: dict[str, Doc] = {}
+    for ev in sorted(crud.supplier_events.all(), key=lambda e: e["at"]):
+        if ev["type"] == "shortage" and ev.get("status") == "open":
+            for pid in ev.get("productIds") or []:
+                out[pid] = ev
     return out
-
-
-def _open_orders(t: dt.date) -> dict[str, list[Doc]]:
-    out: dict[str, list[Doc]] = defaultdict(list)
-    for o in crud.orders.all():
-        if o["status"] in OPEN_STATUSES and dt.date.fromisoformat(o["deliveryDate"][:10]) >= t:
-            out[o["clientId"]].append(o)
-    return out
-
-
-def line_qty(line: Doc) -> float:
-    """What the client ordered (not what was picked: an order short of stock has a picked quantity of 0)."""
-    return line["qty"]
 
 
 def _contact(client: Doc) -> str | None:
@@ -70,146 +56,110 @@ def _contact(client: Doc) -> str | None:
     return contacts[0]["name"] if contacts else None
 
 
-def _product_label(pid: str) -> str:
-    p = crud.products.get(pid)
-    return p["name"] if p else pid
+def _priority(days: int) -> int:
+    """The closer the delivery, the more urgent the call."""
+    return 100 if days <= 1 else 90 if days <= 3 else 75 if days <= 7 else 60 if days <= 14 else 50
 
 
-def _opp(type_: str, priority: int, client: Doc, key: str, title: str, reason: str, facts: list[str], objective: str, **extra) -> Doc:
-    return {
-        "id": f"{type_}~{client['id']}~{key}", "type": type_, "priority": priority, "clientId": client["id"],
-        "clientName": client["name"], "contactName": _contact(client), "title": title, "reason": reason, "facts": facts,
-        "objective": objective, "productIds": extra.get("productIds", []), **({"orderId": extra["orderId"]} if extra.get("orderId") else {}),
-    }  # fmt: skip
+def _deadline(days: int, delivery: str, status: str) -> str:
+    when = "aujourd'hui" if days == 0 else "demain" if days == 1 else fr_day(delivery)
+    if status == "prepared" and days <= 1:
+        return f"Livraison {when} : à prévenir avant le départ du camion"
+    return f"Livraison {when}"
 
 
-# ───────── shortages ─────────
+def _route_days(client: Doc) -> list[str]:
+    """The weekdays on which a route serves the client's zone."""
+    days: set[str] = set()
+    for r in crud.routes.all():
+        if r.get("zone") == client.get("zone"):
+            days.update(r.get("days") or [])
+    return [d for d in WEEKDAYS if d in days]
 
 
-def _shortages(t: dt.date) -> list[Doc]:
-    levels = stock_levels()
-    open_orders = _open_orders(t)
-    since = t - dt.timedelta(days=BUYER_DAYS)
+def _next_route_dates(client: Doc, delivery: str, count: int = 3) -> list[str]:
+    """The next days (from the requested date, up to 14 days) on which a route serves the zone."""
+    served = set(_route_days(client))
+    start = dt.date.fromisoformat(delivery[:10])
     out = []
-    for ev in crud.supplier_events.all():
-        if ev["type"] != "shortage" or ev.get("status") != "open":
+    for k in range(-3, 15):
+        d = start + dt.timedelta(days=k)
+        if d > dt.date.fromisoformat(today()) and WEEKDAYS[d.weekday()] in served and d.strftime("%m-%d") not in FIXED_HOLIDAYS:
+            out.append(d.isoformat())
+    return out[:count] if out else []
+
+
+def _order_issues(t: dt.date) -> list[Doc]:
+    shortages = _open_shortages()
+    out = []
+    for o in _open_orders(t):
+        client = crud.clients.get(o["clientId"])
+        if not client or client["status"] != "active":
             continue
-        supplier = crud.suppliers.get(ev["supplierId"])
-        for pid in ev.get("productIds") or []:
+        delivery = o["deliveryDate"][:10]
+        days = (dt.date.fromisoformat(delivery) - t).days
+        if days > ISSUE_HORIZON_DAYS:
+            continue
+        stock_facts, product_ids, kinds = [], [], []
+        levels = stock_levels(exclude_order_id=o["id"]) if o["status"] in ("draft", "confirmed") else {}
+        for line in o["lines"]:
+            pid, qty = line["productId"], line["qty"]
             product = crud.products.get(pid)
             if not product:
                 continue
-            avail = levels.get(pid, {}).get("available", 0)
-            head = f"Rupture annoncée par {supplier['name'] if supplier else 'le fournisseur'} {fr_day(ev['at'])} : « {ev['title']} »."
-            stock_fact = f"Stock disponible de {product['name']} : {max(0, avail):g} {product['unit']}."
-            affected = set()
-            for cid, orders in open_orders.items():
-                client = crud.clients.get(cid)
-                if not client or client["status"] != "active":
-                    continue
-                for o in orders:
-                    line = next((l for l in o["lines"] if l["productId"] == pid), None)
-                    if line:
-                        affected.add(cid)
-                        locked = o["status"] == "prepared"  # the ERP no longer lets anyone edit a prepared order's lines
-                        out.append(_opp(
-                            "shortage_order", 100, client, o["id"],
-                            f"Rupture de {product['name']} sur sa commande {o['number']}",
-                            f"Sa commande {o['number']} contient {line_qty(line):g} × {product['name']}, que le fournisseur ne livre plus pour le moment.",
-                            [head, stock_fact, f"Commande {o['number']} ({o['status']}), livraison prévue {fr_day(o['deliveryDate'])} : {line_qty(line):g} × {product['name']}.", f"order_id : {o['id']} ; product_id : {pid}",
-                             *(["La commande est DÉJÀ PRÉPARÉE : tu ne peux plus la modifier toi-même (l'ERP le refuse)."] if locked else [])],
-                            ("Le prévenir AVANT le départ du camion et écouter ce qu'il préfère (produit équivalent seulement s'il est d'accord, attendre, ou retirer la ligne). "
-                             "Comme la commande est déjà préparée, tu ne peux pas la changer toi-même : enregistre SA DÉCISION avec log_client_event pour que l'équipe l'applique, et ne dis jamais que c'est déjà fait.")
-                            if locked else "Le prévenir AVANT la livraison et trouver une solution avec lui (produit équivalent seulement s'il est d'accord, ou attendre, ou retirer la ligne) en modifiant la commande avec tes outils.",
-                            productIds=[pid], orderId=o["id"],
-                        ))  # fmt: skip
-            counts: dict[str, int] = defaultdict(int)
-            for cid, ds in _deliveries().items():
-                for d, o in ds:
-                    if since < d <= t and any(l["productId"] == pid for l in o["lines"]):
-                        counts[cid] += 1
-            for cid, n in sorted(counts.items(), key=lambda x: -x[1])[:3]:
-                client = crud.clients.get(cid)
-                if cid in affected or not client or client["status"] != "active" or n < 3:
-                    continue
-                out.append(_opp(
-                    "shortage_heads_up", 60, client, pid, f"Prévenir de la rupture de {product['name']}",
-                    f"Il achète régulièrement {product['name']} ({n} commandes ces {BUYER_DAYS} derniers jours) et il est en rupture chez le fournisseur.",
-                    [head, stock_fact, f"{n} commandes de {product['name']} ces {BUYER_DAYS} derniers jours.", f"product_id : {pid}"],
-                    "Le prévenir avant sa prochaine commande et lui proposer une alternative (il décide).",
-                    productIds=[pid],
-                ))  # fmt: skip
-    return out
-
-
-# ───────── overdue regulars ─────────
-
-
-def _overdue(t: dt.date) -> list[Doc]:
-    open_orders = _open_orders(t)
-    out = []
-    for client in crud.clients.all():
-        if client["status"] != "active" or open_orders.get(client["id"]):
-            continue
-        ds = _deliveries().get(client["id"], [])
-        days = sorted({d for d, _ in ds if d <= t and (t - d).days <= 365})
-        if len(days) < MIN_ORDERS_YEAR:
-            continue
-        typical = statistics.median((b - a).days for a, b in zip(days, days[1:]))
-        since = (t - days[-1]).days
-        if not (since >= max(OVERDUE_FACTOR * typical, typical + 2) and since <= MAX_OVERDUE_DAYS):
-            continue
-        last_year = [d for d, _ in ds if t - dt.timedelta(days=364 + 28) < d <= t - dt.timedelta(days=364)]
-        if len(last_year) < 2:
-            continue  # it did not order at this time last year either: a seasonal business that is closed, not a forgotten order
-        last = next(o for d, o in reversed(ds) if d == days[-1])
-        lines = ", ".join(f"{line_qty(l):g} × {_product_label(l['productId'])}" for l in last["lines"][:4])
-        delivery_days = ", ".join(client.get("deliveryDays") or [])
-        out.append(_opp(
-            "overdue", 70 + min(20, round(since / max(typical, 1) * 3)), client, "-", "Commande habituelle en retard",
-            f"Il commande d'habitude tous les {typical:g} jours et sa dernière livraison date d'il y a {since} jours.",
-            [f"Rythme habituel : une commande tous les {typical:g} jours (environ).", f"Dernière commande {last['number']} livrée {fr_day(last['deliveryDate'])}, il y a {since} jours : {lines}.",
-             f"Jours de livraison habituels : {delivery_days}." if delivery_days else "", "Aucune commande en cours pour ce client."],
-            "Prendre de ses nouvelles et lui proposer de reprendre « comme la dernière fois » (outil reorder_last_order), à ajuster selon ce qu'il dit.",
-        ))  # fmt: skip
-        out[-1]["facts"] = [f for f in out[-1]["facts"] if f]
-    return out
-
-
-# ───────── seasonal reminders ─────────
-
-
-def _seasonal(t: dt.date) -> list[Doc]:
-    out = []
-    peaks = [p for p in season_radar(horizon_weeks=8)["peaks"] if p["daysUntilRamp"] <= SEASONAL_DAYS]
-    peaks.sort(key=lambda p: -p["peakIndex"] * p["usualWeekQty"])
-    for p in peaks[:4]:
-        product = crud.products.get(p["productId"])
-        ramp = dt.date.fromisoformat(p["rampWeekStart"])
-        lo, hi = ramp - dt.timedelta(days=364 + 7), ramp - dt.timedelta(days=364) + dt.timedelta(days=35)
-        bought: dict[str, float] = defaultdict(float)
-        for cid, ds in _deliveries().items():
-            for d, o in ds:
-                if lo <= d <= hi:
-                    bought[cid] += sum(line_qty(l) for l in o["lines"] if l["productId"] == p["productId"])
-        for cid, qty in sorted(bought.items(), key=lambda x: -x[1])[:2]:
-            client = crud.clients.get(cid)
-            if qty <= 0 or not client or client["status"] != "active":
+            event = shortages.get(pid)
+            available = max(0, levels.get(pid, {}).get("available", 0))
+            if event:
+                supplier = crud.suppliers.get(event["supplierId"])
+                stock_facts.append(f"{qty:g} × {product['name']} : rupture annoncée par {supplier['name'] if supplier else 'le fournisseur'} {fr_day(event['at'])} (« {event['title']} »). product_id : {pid}")
+            elif o["status"] in ("draft", "confirmed") and available < qty:
+                stock_facts.append(f"{qty:g} × {product['name']} : stock insuffisant, {available:g} disponible(s). product_id : {pid}")
+            else:
                 continue
-            facts = [
-                f"La demande de {product['name']} devrait être environ ×{p['peakIndex']:g} à partir de la semaine du {fr_day(p['rampWeekStart']).removeprefix('le ')} (d'après les ventes des années passées).",
-                f"L'an dernier à la même période, ce client avait pris {qty:g} {product['unit']} de {product['name']}.",
-                f"Stock disponible : {p['available']:g} {product['unit']} (+ {p['incoming']:g} attendus des commandes fournisseurs confirmées).",
-                f"product_id : {p['productId']}",
-            ]
-            if product["category"] == "bulles":
-                facts.append(FESTIVE_RULE)
-            out.append(_opp(
-                "seasonal", 50 + min(10, round(p["peakIndex"])), client, p["productId"], f"Anticiper la saison : {product['name']}",
-                f"{product['name']} va fortement monter et il en avait pris {qty:g} l'an dernier à cette période.",
-                facts, "Lui rappeler la période à venir et lui proposer de préparer une commande (brouillon) maintenant, sans le presser.",
-                productIds=[p["productId"]],
-            ))  # fmt: skip
+            product_ids.append(pid)
+        if stock_facts:
+            kinds.append("stock")
+        delivery_fact = None
+        if o["status"] in ("draft", "confirmed"):
+            route = next((w for w in order_warnings(o) if w["code"] == "no_route"), None)
+            if route:
+                kinds.append("delivery")
+                options = _next_route_dates(client, delivery)
+                days_served = ", ".join(WEEKDAYS_FR[WEEKDAYS.index(d)] for d in _route_days(client))
+                delivery_fact = f"{route['message'].rstrip('.')}. Les tournées de sa zone passent le : {days_served}."
+                if options:
+                    delivery_fact += " Dates possibles : " + ", ".join(fr_day(d).removeprefix("le ") + f" ({d})" for d in options) + "."
+        if not kinds:
+            continue
+        number = o["number"]
+        first = crud.products.require(product_ids[0])["name"] if product_ids else None
+        if kinds == ["stock"]:
+            title = f"{first} indisponible : sa commande {number} est à adapter" + (f" (+{len(product_ids) - 1} autre(s))" if len(product_ids) > 1 else "")
+            reason = f"Sa commande {number} contient un produit que nous ne pouvons pas lui livrer comme prévu."
+        elif kinds == ["delivery"]:
+            title = f"Aucune tournée le {fr_day(delivery).removeprefix('le ')} : livraison de {number} à décaler"
+            reason = f"Sa commande {number} est demandée pour un jour où aucune tournée ne dessert sa zone."
+        else:
+            title = f"Commande {number} : livraison impossible à cette date et stock insuffisant"
+            reason = f"Sa commande {number} est demandée un jour sans tournée, et un produit ne peut pas être livré comme prévu."
+        facts = [f"Commande {number} (statut : {o['status']}), livraison demandée {fr_day(delivery).rstrip('.')}. order_id : {o['id']}"]
+        facts += stock_facts + ([delivery_fact] if delivery_fact else [])
+        if o["status"] == "prepared":
+            facts.append("La commande est DÉJÀ PRÉPARÉE : tu ne peux plus la modifier toi-même (l'ERP le refuse).")
+        steps = []
+        if "stock" in kinds:
+            steps.append("Lui dire quels produits manquent et trouver avec lui la solution : attendre, retirer la ligne, ou un produit équivalent (find_alternatives) SEULEMENT s'il est d'accord.")
+        if "delivery" in kinds:
+            steps.append("Lui dire qu'aucune tournée ne dessert sa zone ce jour-là et lui proposer les dates possibles ; s'il en choisit une, change la date avec update_order.")
+        steps.append(
+            "Comme la commande est déjà préparée, tu ne peux pas la changer toi-même : enregistre SA DÉCISION avec log_client_event pour que l'équipe l'applique, et ne dis jamais que c'est déjà fait."
+            if o["status"] == "prepared" else "Applique ce qu'il décide avec tes outils (order_id ci-dessus), puis récapitule ce qui est modifié."
+        )
+        out.append({
+            "id": f"order_issue~{client['id']}~{o['id']}", "type": "order_issue", "priority": _priority(days), "clientId": client["id"],
+            "clientName": client["name"], "contactName": _contact(client), "title": title, "reason": reason, "facts": facts,
+            "objective": " ".join(steps), "kinds": kinds, "deadline": _deadline(days, delivery, o["status"]), "productIds": product_ids, "orderId": o["id"],
+        })  # fmt: skip
     return out
 
 
@@ -217,8 +167,7 @@ def _seasonal(t: dt.date) -> list[Doc]:
 
 
 def opportunities() -> list[Doc]:
-    t = dt.date.fromisoformat(today())
-    items = _shortages(t) + _overdue(t) + _seasonal(t)
+    items = _order_issues(dt.date.fromisoformat(today()))
     items.sort(key=lambda o: (-o["priority"], o["clientName"]))
     return items
 
@@ -228,7 +177,7 @@ def _brief(opp: Doc, client: Doc) -> str:
     contact = next(iter(client.get("contacts") or []), None)
     who = f"{contact['name']} ({contact.get('role', 'contact')})" if contact else "le contact habituel"
     lines = [
-        "APPEL SORTANT : c'est TOI qui appelles ce client, il n'a rien demandé.",
+        "APPEL SORTANT : c'est TOI qui appelles ce client parce qu'il doit être prévenu d'un problème sur sa commande.",
         f"Client : {client['name']} (client_id : {client['id']}). Tu demandes {who}.",
         f"Préférences connues : {(client.get('preferences') or 'aucune').rstrip('. ')}.",
         *(f"Note d'un commercial : {n}" for n in notes),
@@ -237,16 +186,17 @@ def _brief(opp: Doc, client: Doc) -> str:
         "FAITS VÉRIFIÉS (tu ne cites QUE ces faits et ce que renvoient tes outils) :",
         *(f"- {f}" for f in opp["facts"]),
         "",
-        f"OBJECTIF : {opp['objective']}",
+        f"ÉCHÉANCE : {opp['deadline'].rstrip('.')}.",
+        f"CE QUE TU FAIS : {opp['objective']}",
         "",
         "COMMENT TU PROCÈDES :",
-        "1. Ouvre en une ou deux phrases courtes : bonjour, qui tu es (le Comptoir des Chartrons), la raison de l'appel, et demande s'il a une minute.",
-        "2. S'il n'a pas le temps ou refuse : remercie, propose de rappeler plus tard s'il le souhaite, et conclus. N'insiste jamais.",
-        "3. S'il accepte : fais UNE proposition à la fois, écoute, adapte-toi à ce qu'il dit.",
-        "4. Toute commande ou modification passe par tes outils habituels : brouillon, récapitulatif, accord explicite avant de confirmer. Jamais de confirmation sans « oui » clair.",
-        "5. Pour remplacer un produit, utilise find_alternatives et respecte ses préférences : seulement avec son accord explicite.",
-        f"6. En fin d'appel, enregistre l'issue avec log_client_event (client_id {client['id']}, type call, titre « Appel proactif : … », description courte de ce qui a été dit et décidé).",
-        "INTERDIT : promettre une heure de livraison, un e-mail ou un rappel que tu ne peux pas assurer ; inventer un prix, un stock, une date ; proposer une remise ; changer un produit sans son accord.",
+        "1. Ouvre en une ou deux phrases courtes : bonjour, qui tu es (le Comptoir des Chartrons), le problème, et demande s'il a une minute.",
+        "2. S'il n'a pas le temps : dis l'essentiel en une phrase (le problème et ce qui est urgent) et conclus. Ne le retiens pas.",
+        "3. Propose UNE solution à la fois, écoute, adapte-toi à ce qu'il dit.",
+        "4. Toute modification passe par tes outils habituels. Après une modification, récapitule ce qui change. Tu ne confirmes une commande en brouillon que s'il dit « oui » clairement.",
+        "5. Pour remplacer un produit, utilise find_alternatives et respecte ses préférences : seulement avec son accord explicite. Ajoute D'ABORD la nouvelle ligne (add_order_line avec substitute_for), PUIS retire l'ancienne (l'ERP refuse de retirer la dernière ligne d'une commande). Ne raconte jamais une erreur technique au client : corrige-la en silence.",
+        f"6. En fin d'appel : enregistre D'ABORD le résultat avec log_client_event (client_id {client['id']}, type call, titre « Appel proactif : <ce qui a été décidé, en une phrase> », description courte), SANS rien dire avant, puis dis UNE seule phrase de conclusion. Dis « j'ai noté votre décision dans votre dossier » : jamais « j'ai transmis à l'équipe » ni « l'équipe va l'appliquer » (personne n'est prévenu automatiquement).",
+        "INTERDIT : promettre une heure de livraison, un e-mail ou un rappel que tu ne peux pas assurer ; inventer un prix, un stock, une date ; proposer une remise ; changer un produit sans son accord ; parler d'autre chose que de ce problème (ne cite pas les alertes de l'ERP qui n'en font pas partie : date limite d'un lot, crédit, etc.).",
     ]
     return "\n".join(lines)
 
@@ -260,7 +210,7 @@ def opportunity_brief(opp_id: str) -> Doc:
 
 # ───────── The agent decides to call by itself ─────────
 #
-# A background loop looks for the most urgent opportunity and makes the call "ring" on the client's side; the agent speaks first
+# A background loop looks for the most urgent order issue and makes the call "ring" on the client's side; the agent speaks first
 # when someone picks up. The decision is made by auditable rules, not by the model: one call at a time, a pause between calls,
 # never below a minimum urgency, never the same client twice in a day (an "Appel proactif" line in its history), and an
 # opportunity that was already tried is not retried for 30 minutes. Calls live in memory (a live journal, not records).
@@ -283,7 +233,7 @@ CONFIG: dict = {
     "retry_minutes": 30,
     "min_priority": _env("PROACTIVE_MIN_PRIORITY", 50),
 }
-CALLS: list[Doc] = []  # newest first; keys starting with "_" are internal timestamps and never leave the API
+CALLS: list[Doc] = []  # newest first; keys starting with "_" are internal and never leave the API
 
 
 def plan_dispatch(calls: list[Doc], opps: list[Doc], called_today: set[str], now: float, cfg: dict, force: bool = False) -> tuple[list[tuple[str, str]], Doc | None]:
@@ -304,7 +254,7 @@ def plan_dispatch(calls: list[Doc], opps: list[Doc], called_today: set[str], now
             continue
         return changes, {
             "id": uuid.uuid4().hex[:12], "opportunityId": o["id"], "clientId": o["clientId"], "clientName": o["clientName"],
-            "contactName": o.get("contactName"), "type": o["type"], "title": o["title"], "reason": o["reason"],
+            "contactName": o.get("contactName"), "type": o["type"], "title": o["title"], "reason": o["reason"], "deadline": o.get("deadline", ""),
             "priority": o["priority"], "status": "ringing", "createdAt": dt.datetime.now(dt.UTC).isoformat(timespec="seconds"), "_t": now,
         }  # fmt: skip
     return changes, None
@@ -318,6 +268,10 @@ def _called_today() -> set[str]:
     }  # fmt: skip
 
 
+def _last_event_id() -> str:
+    return max((e["id"] for e in crud.client_events.all()), default="")
+
+
 def dispatch_once(force: bool = False) -> Doc | None:
     now = time.time()
     changes, new = plan_dispatch(CALLS, opportunities(), _called_today(), now, CONFIG, force)
@@ -326,7 +280,7 @@ def dispatch_once(force: bool = False) -> Doc | None:
     if new:
         CALLS.insert(0, new)
         del CALLS[100:]
-        log.info("proactive: the agent is calling %s (%s)", new["clientName"], new["type"])
+        log.info("proactive: the agent is calling %s (%s)", new["clientName"], new["title"])
     return new
 
 
@@ -334,6 +288,18 @@ def _end(call_id: str, status: str, now: float) -> None:
     c = next(c for c in CALLS if c["id"] == call_id)
     c["status"], c["_end"] = status, now
     c["endedAt"] = dt.datetime.now(dt.UTC).isoformat(timespec="seconds")
+    if status == "answered":
+        c["_mark"] = _last_event_id()  # the call's outcome is the first "Appel proactif" line written in the client's history after this
+
+
+def _outcome(c: Doc) -> str | None:
+    """What was decided: the title of the history line the agent wrote at the end of the call."""
+    if c["status"] != "answered":
+        return None
+    for e in sorted(crud.client_events.all(), key=lambda e: e["id"]):
+        if e["clientId"] == c["clientId"] and e["id"] > c.get("_mark", "") and e["type"] == "call" and e["title"].startswith("Appel proactif"):
+            return e["title"].removeprefix("Appel proactif").lstrip(" :")
+    return None
 
 
 def calls(status: str | None = None) -> list[Doc]:
@@ -341,7 +307,7 @@ def calls(status: str | None = None) -> list[Doc]:
     for c in CALLS:  # a call nobody picks up is missed, even between two cycles of the loop
         if c["status"] == "ringing" and now - c["_t"] >= CONFIG["ring_seconds"]:
             _end(c["id"], "missed", now)
-    return [c for c in CALLS if not status or c["status"] == status]
+    return [{**c, "outcome": _outcome(c)} for c in CALLS if not status or c["status"] == status]
 
 
 def answer_call(call_id: str, status: str = "answered") -> Doc:
@@ -351,7 +317,7 @@ def answer_call(call_id: str, status: str = "answered") -> Doc:
     if call["status"] != "ringing":
         raise conflict("not_ringing", "Cet appel ne sonne plus")
     _end(call_id, status, time.time())
-    return call
+    return next(c for c in calls() if c["id"] == call_id)
 
 
 def clear_calls() -> None:
