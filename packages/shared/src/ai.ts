@@ -59,7 +59,8 @@ export type VoiceClientMessage =
   | { type: "audio_start"; mime: string; hint?: string } // caller pressed space (hint: optional STT vocabulary; mock STT returns it)
   | { type: "audio_end" } // caller released space; binary frames sent in between (every 100–250 ms) are the utterance, streamed to the STT as they arrive
   | { type: "text"; text: string } // typed instead of spoken (debug)
-  | { type: "reset" };
+  | { type: "reset" }
+  | { type: "outbound"; opportunityId: string }; // V3: the AGENT phones first (an occasion of GET /api/proactive/opportunities)
 
 export interface TurnTimings {
   sttMs?: number;

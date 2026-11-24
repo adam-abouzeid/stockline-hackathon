@@ -19,6 +19,7 @@ import type {
 } from "@kit/shared";
 import type { Receivables } from "@kit/shared";
 import type { OfferInput, RadarBacktest, SeasonRadar, StockRescue } from "@kit/shared";
+import type { AutodialState, CallStatus, DispatchResult, ProactiveBrief, ProactiveCall, ProactiveOpportunity } from "@kit/shared";
 import type { Category } from "@kit/shared";
 import type { ContextEntry, ContextEntryInput, ContextEntrySummary, ContextForEntity, ContextScope } from "@kit/shared";
 import type { ListParams, Page } from "@kit/shared";
@@ -272,6 +273,18 @@ export const api = {
     create: (body: ContextEntryInput) => post<ContextEntry>("/context", body),
     update: (id: Id, body: Partial<ContextEntryInput>) => patch<ContextEntry>(`/context/${id}`, body),
     remove: (id: Id) => del<{ ok: true }>(`/context/${id}`),
+  },
+
+  proactive: {
+    list: () => get<ProactiveOpportunity[]>("/proactive/opportunities"),
+    get: (id: string) => get<ProactiveBrief>(`/proactive/opportunities/${encodeURIComponent(id)}`),
+    /** The calls the agent placed by itself (journal); `ringing` = waiting for the client to pick up. Polled: silent on errors. */
+    calls: (status?: CallStatus) => get<ProactiveCall[]>("/proactive/calls", { status }, { silent: true }),
+    answer: (id: string) => post<ProactiveCall>(`/proactive/calls/${id}/answer`),
+    decline: (id: string) => post<ProactiveCall>(`/proactive/calls/${id}/decline`),
+    dispatch: () => post<DispatchResult>("/proactive/dispatch"),
+    autodial: () => get<AutodialState>("/proactive/autodial", undefined, { silent: true }),
+    setAutodial: (enabled: boolean) => post<AutodialState>("/proactive/autodial", { enabled }),
   },
 
   predictions: {

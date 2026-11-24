@@ -22,6 +22,7 @@ import RoutesPage from "@/pages/routes";
 import ActivityPage from "@/pages/activity";
 import VoicePage from "@/pages/voice";
 import PredictionsPage from "@/pages/predictions";
+import ProactivePage from "@/pages/proactive";
 import HistoryPage from "@/pages/history";
 import PricesPage from "@/pages/prices";
 import GroupsPage from "@/pages/groups";
@@ -52,6 +53,7 @@ export const router = createBrowserRouter([
       { path: "activity", element: <ActivityPage /> },
       { path: "voice", element: <VoicePage /> },
       { path: "predictions", element: <PredictionsPage /> },
+      { path: "proactive", element: <ProactivePage /> },
       { path: "history", element: <HistoryPage /> },
       { path: "prices", element: <PricesPage /> },
       { path: "groups", element: <GroupsPage /> },

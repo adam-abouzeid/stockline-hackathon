@@ -1,6 +1,6 @@
 /** Navigation model: sidebar groups + ⌘K "Aller à" commands. Add a page here AND in app/routes.tsx. */
 import {
-  Activity, AudioLines, TrendingUp, Boxes, Building2, FileText, Home, Package, ShoppingCart, Sparkles, Truck, Users, Wallet, Warehouse,
+  Activity, AudioLines, PhoneOutgoing, TrendingUp, Boxes, Building2, FileText, Home, Package, ShoppingCart, Sparkles, Truck, Users, Wallet, Warehouse,
   type LucideIcon,
 } from "lucide-react";
 import { History } from "lucide-react";
@@ -44,6 +44,7 @@ export const NAV: NavGroup[] = [
     label: "IA",
     items: [
       { to: "#assistant", label: "Assistant", icon: Sparkles, keywords: "chat ia" },
+      { to: "/proactive", label: "Appels du jour", icon: PhoneOutgoing, keywords: "appel proactif sortant relance rupture retard saison agent" },
       { to: "/predictions", label: "Prévisions", icon: TrendingUp, keywords: "prévision saison pic radar stock écouler offre péremption achat" },
       { to: "/voice", label: "Voix", icon: AudioLines, keywords: "agent vocal appel" },
       { to: "/context", label: "Contexte", icon: BookOpen, keywords: "contexte ia fiches connaissances mémoire règles procédures préférences" },

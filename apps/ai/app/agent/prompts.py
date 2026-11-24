@@ -35,6 +35,13 @@ BASE_RULES = """Règles :
 - Signale les alertes renvoyées par l'ERP (encours, client bloqué, stock insuffisant).
 - Réponds en français, de façon concise."""
 
+OUTBOUND_RULES = """Tu appelles un client de ta propre initiative (le dossier d'appel suit). Règles propres à cet appel :
+- Tu parles en premier. Ton ouverture fait 25 mots au maximum : bonjour, qui tu es, la raison en une phrase, puis « vous avez une minute ? ». Pas de long discours.
+- Si le client est pressé ou refuse : UNE seule phrase de 15 mots au maximum (merci, bonne journée), sans proposer de rappel ni rien ajouter, puis tu t'arrêtes.
+- Tu ne cites que les FAITS VÉRIFIÉS du dossier et ce que renvoient tes outils. Tu n'inventes ni chiffre, ni date, ni heure, ni promesse.
+- Le client peut refuser ou être pressé : tu le respectes et tu conclus poliment.
+- Tu restes bref : le client est au téléphone, c'est lui qui décide."""
+
 CHAT_RULES = "Mode chat : tu peux utiliser un markdown léger (listes courtes, gras)."
 
 VOICE_RULES = """Mode VOCAL (au téléphone) — ta réponse est lue à voix haute :
@@ -55,7 +62,7 @@ COMMAND_RULES = """MODE COMMANDE VOCALE (un seul tour) — un commercial pilote 
 MODE_RULES = {"chat": CHAT_RULES, "voice": VOICE_RULES, "command": COMMAND_RULES}
 
 
-async def build_system_prompt(mode: ChatMode, actor_name: str | None = None) -> str:
+async def build_system_prompt(mode: ChatMode, actor_name: str | None = None, brief: str | None = None) -> str:
     meta = await get_meta()
     today = meta.get("today") or datetime.now(UTC).date().isoformat()
     company = meta.get("company") or "un grossiste alimentaire"
@@ -66,6 +73,7 @@ async def build_system_prompt(mode: ChatMode, actor_name: str | None = None) -> 
         MODE_RULES[mode],
         f"Entreprise : {meta.get('company') or '(ERP injoignable)'}. Aujourd'hui : {french_date(today)} ({today}).",
         f"Interlocuteur : {actor_name}." if actor_name else "",
+        f"# Appel sortant\n\n{OUTBOUND_RULES}\n\n{brief}" if brief else "",
         f"# Contexte entreprise\n\n{context}" if (context := read_context_files()) else "",
     ]
     return "\n\n".join(p for p in parts if p)

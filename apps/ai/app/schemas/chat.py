@@ -45,6 +45,7 @@ class ChatRequest(WireModel):
         None, description="voice → short spoken-style answers; command → single-turn, act-first, one line"
     )
     actor_name: str | None = None
+    brief: str | None = Field(None, description="V3 outbound call: the call brief (added to the system prompt); the agent phones first")
 
 
 class Usage(WireModel):

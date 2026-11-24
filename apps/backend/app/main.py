@@ -5,6 +5,7 @@ On boot the SQLite database is loaded into memory, or seeded from the data pack 
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from typing import Any
@@ -31,6 +32,7 @@ from app.routers import (
     orders,
     predictions,
     pricing,
+    proactive,
     products,
     purchase_orders,
     stock,
@@ -52,7 +54,11 @@ async def lifespan(_: FastAPI):
         source = reset_from_pack()
     log.info("today=%s — %s: %s", get_meta()["today"], source, counts())
     warm_up()
+    from app.services import proactive as proactive_service  # (the router module has the same name)
+
+    autodial = asyncio.create_task(proactive_service.autodial_loop())  # the agent decides by itself whom to phone
     yield
+    autodial.cancel()
 
 
 def warm_up() -> None:
@@ -103,6 +109,7 @@ for router in [
     logistics.route_runs,
     context.router,
     predictions.router,
+    proactive.router,
 ]:
     app.include_router(router, responses=ERROR_RESPONSES)
 

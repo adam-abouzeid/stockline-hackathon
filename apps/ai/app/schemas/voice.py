@@ -49,8 +49,16 @@ class ResetMessage(WireModel):
     type: Literal["reset"] = "reset"
 
 
+class OutboundMessage(WireModel):
+    """V3: the AGENT phones first. `opportunity_id` is an occasion of GET /api/proactive/opportunities; the server loads its call
+    brief, clears the conversation and the agent speaks first (the caller picks up)."""
+
+    type: Literal["outbound"] = "outbound"
+    opportunity_id: str
+
+
 VoiceClientMessage = Annotated[
-    Union[StartMessage, AudioStartMessage, AudioEndMessage, TextMessage, ResetMessage],
+    Union[StartMessage, AudioStartMessage, AudioEndMessage, TextMessage, ResetMessage, OutboundMessage],
     Field(discriminator="type"),
 ]
 

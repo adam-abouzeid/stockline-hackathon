@@ -32,6 +32,7 @@ from .voice import (
     AudioStartMessage,
     ReadyMessage,
     ResetMessage,
+    OutboundMessage,
     StartMessage,
     TextMessage,
     TranscriptMessage,

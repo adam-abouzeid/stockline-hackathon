@@ -42,6 +42,7 @@ from app.schemas import (
     ErrorEvent,
     ReadyMessage,
     ResetMessage,
+    OutboundMessage,
     StartMessage,
     TextEvent,
     TextMessage,
@@ -53,12 +54,15 @@ from app.schemas import (
     VoiceErrorMessage,
 )
 from app.schemas.base import WireModel
-from app.tools import all_tools
+from app.tools import ErpClient, all_tools
 
 from .utterance import Utterance
 from .vocabulary import stt_hint
 
 client_message = TypeAdapter(VoiceClientMessage)
+
+# V3 outbound call: the synthetic first turn that makes the agent open the call (never shown, never spoken by the caller).
+OUTBOUND_OPENING = "(Le client décroche. C'est toi qui appelles : présente-toi et dis en une phrase pourquoi tu appelles.)"
 
 
 @dataclass
@@ -66,6 +70,7 @@ class Conversation:
     id: str
     actor_name: str | None = None
     history: list[ChatMessage] = field(default_factory=list)
+    brief: str | None = None  # V3: the call brief of an outbound call (kept for the whole conversation)
 
 
 # In memory: a reconnect with the same sessionId continues the conversation.
@@ -141,9 +146,14 @@ class VoiceConnection:
             case TextMessage(text=text):
                 await self.interrupt()
                 self.start_turn(text=text)
+            case OutboundMessage(opportunity_id=opportunity_id):
+                await self.interrupt()
+                self.conversation.history, self.conversation.brief = [], None
+                self.start_turn(outbound=opportunity_id)
             case ResetMessage():
                 await self.interrupt()
                 self.conversation.history = []
+                self.conversation.brief = None
                 await self.open(self.conversation.id)
 
     async def send_partial(self, update: STTUpdate) -> None:
@@ -182,6 +192,7 @@ class VoiceConnection:
         conv: Conversation,
         text: str | None = None,
         utterance: Utterance | None = None,  # spoken: already being transcribed since audio_start
+        outbound: str | None = None,  # V3: an opportunity id: the AGENT speaks first
     ) -> None:
         t0 = time.perf_counter()  # end of caller speech
         timings = TurnTimings()
@@ -192,20 +203,26 @@ class VoiceConnection:
         speaker: Speaker | None = None
         try:
             # 1. Speech → text: with a streaming STT only the last words are left to finalize
-            if utterance is not None:
-                text = await utterance.text()
-                timings.stt_ms = ms_since(t0)  # end of speech → final transcript
-            heard = (text or "").strip()
-            if not heard:
-                await self.send(VoiceErrorMessage(message="Rien entendu — réessayez."))
-                return
-            await self.send(TranscriptMessage(text=heard, final=True))
+            if outbound is not None:
+                # V3: no caller speech. Load the call brief; a synthetic first turn makes the agent open the call.
+                conv.brief = (await ErpClient("voice_agent", conv.actor_name).get(f"/api/proactive/opportunities/{outbound}"))["brief"]
+                heard = OUTBOUND_OPENING
+                working = [ChatMessage(role="user", content=OUTBOUND_OPENING)]
+            else:
+                if utterance is not None:
+                    text = await utterance.text()
+                    timings.stt_ms = ms_since(t0)  # end of speech → final transcript
+                heard = (text or "").strip()
+                if not heard:
+                    await self.send(VoiceErrorMessage(message="Rien entendu — réessayez."))
+                    return
+                await self.send(TranscriptMessage(text=heard, final=True))
 
-            # 2. Agent, on a working copy of the history (committed at the end)
-            working = [*conv.history, ChatMessage(role="user", content=heard)]
+                # 2. Agent, on a working copy of the history (committed at the end)
+                working = [*conv.history, ChatMessage(role="user", content=heard)]
             speaker = Speaker(get_tts_client(), self.send, self.send_bytes)
             llm_start = time.perf_counter()
-            async for ev in run_agent(working, llm=get_llm_client(), tools=all_tools(), mode="voice", actor_name=conv.actor_name):
+            async for ev in run_agent(working, llm=get_llm_client(), tools=all_tools(), mode="voice", actor_name=conv.actor_name, brief=conv.brief):
                 match ev:
                     case TextEvent(delta=delta):
                         if timings.llm_first_token_ms is None:

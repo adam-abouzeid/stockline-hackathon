@@ -119,7 +119,8 @@ export function useVoiceSession() {
     }
     let m: VoiceServerMessage;
     try { m = JSON.parse(ev.data); } catch { return; }
-    const id = currentTurn.current;
+    // V3 outbound call: the agent speaks before any caller turn exists, so its first words open one.
+    const id = currentTurn.current ?? (m.type === "agent_text" || m.type === "agent_tool" ? newTurn({ text: "(appel sortant : l'agent appelle le client)", at: Date.now(), status: "final" }) : undefined);
     switch (m.type) {
       case "ready":
         sessionId.current = m.sessionId;
@@ -320,8 +321,19 @@ export function useVoiceSession() {
     setLastError(undefined);
   }, [send, stopPlayback]);
 
+  /** V3: the AGENT phones first. Call it from a click (the browser needs a user gesture to play the agent's first words). */
+  const callOut = useCallback((opportunityId: string) => {
+    stopPlayback();
+    currentTurn.current = undefined;
+    setTurns([]);
+    setActivity("thinking");
+    setLastError(undefined);
+    releasedAt.current = performance.now();
+    send({ type: "outbound", opportunityId });
+  }, [send, stopPlayback]);
+
   return {
     conn, activity, mic, providers, turns, level, lastError,
-    startTalking, stopTalking, sendText, stopPlayback, reset, reconnect: connect,
+    startTalking, stopTalking, sendText, stopPlayback, reset, callOut, reconnect: connect,
   };
 }

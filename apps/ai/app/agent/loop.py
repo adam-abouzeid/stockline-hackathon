@@ -48,6 +48,7 @@ async def run_agent(
     mode: ChatMode = "chat",  # command = single turn, act-first
     actor_name: str | None = None,
     max_steps: int | None = None,
+    brief: str | None = None,  # V3: outbound call brief, added to the system prompt
 ) -> AsyncIterator[ChatStreamEvent]:
     started = time.perf_counter()
     actor = "ai_chat" if mode == "chat" else "voice_agent"
@@ -55,7 +56,7 @@ async def run_agent(
     usage = Usage(input_tokens=0, output_tokens=0)
 
     try:
-        system = await build_system_prompt(mode, actor_name)
+        system = await (build_system_prompt(mode, actor_name, brief) if brief else build_system_prompt(mode, actor_name))
         request = LLMRequest(system=system, messages=messages, tools=[t.info for t in tools])
         said_something = False
 

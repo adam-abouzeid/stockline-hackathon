@@ -4,6 +4,7 @@ import { useActivityStream } from "@/lib/queries";
 import { cn } from "@/lib/cn";
 import { CommandK, PageHeaderSlot, ResizeHandle, Toaster, useResizableWidth } from "@/ui";
 import { AssistantPanel } from "@/features/assistant/AssistantPanel";
+import { IncomingCall } from "@/features/proactive/IncomingCall";
 import { VoiceCommandButton, VoiceCommandProvider } from "@/features/voice-command";
 import { AssistantButton } from "./AssistantButton";
 import { Sidebar } from "./Sidebar";
@@ -91,6 +92,7 @@ export function AppShell() {
       <CommandK />
       <Toaster />
       <VoiceCommandProvider />
+      <IncomingCall />
     </div>
   );
 }

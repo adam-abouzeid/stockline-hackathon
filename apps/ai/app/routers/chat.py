@@ -18,5 +18,5 @@ async def chat(body: ChatRequest):
     # The harness owns the system prompt; a client-rebuilt history with a broken tool pairing must not 400 the provider.
     messages = sanitize_history(body.messages)
     return sse_response(
-        run_agent(messages, llm=get_llm_client(), tools=all_tools(), mode=body.mode or "chat", actor_name=body.actor_name)
+        run_agent(messages, llm=get_llm_client(), tools=all_tools(), mode=body.mode or "chat", actor_name=body.actor_name, brief=body.brief)
     )

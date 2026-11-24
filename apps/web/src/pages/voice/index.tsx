@@ -16,6 +16,7 @@ import { useVoiceSession, type Activity, type Conn } from "@/features/assistant/
 import { CommandMode } from "./command";
 import { LiveActivity } from "./live-activity";
 import { LiveOrder } from "./live-order";
+import { OutboundBanner } from "./outbound";
 import { MetricsBar } from "./metrics";
 import { LevelBars, Timeline } from "./timeline";
 
@@ -111,6 +112,7 @@ function CallMode({ modeSwitch }: { modeSwitch: ReactNode }) {
       />
       <div className="flex min-h-0 flex-1">
         <section className="flex min-w-0 flex-1 flex-col">
+          <OutboundBanner ready={ready} started={v.turns.length > 0} onCall={v.callOut} />
           <MetricsBar turns={v.turns} />
           <Timeline turns={v.turns} activity={v.activity} level={v.level} />
 
